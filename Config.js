@@ -97,6 +97,12 @@ var CONFIG = {
   GS_SCAN_EVERY_HOURS: 3,
   GS_MAX_COURSES: 8,
 
+  // Gradescope emails a receipt after each submission (from
+  // no-reply@gradescope.com). MailBrah uses one as a trigger to re-check
+  // that course immediately and tick off the matching task; the email text
+  // itself is never sent to Gemini. Receipts must land in THIS inbox.
+  GS_RECEIPT_QUERY: 'from:gradescope.com newer_than:3d -label:mailbrah-processed',
+
   // Brightspace (D2L) deadline sync. Paste your personal calendar-feed URL:
   // Brightspace > Calendar > Settings (gear) > Enable Calendar Feed >
   // Subscribe > All Calendars and Tasks > copy URL. Leave '' to disable.

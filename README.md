@@ -20,10 +20,10 @@ MailBrah runs as a personal Google Apps Script attached to your Google account.
 |---|---|---|
 | Gmail | Recent messages from USC senders that mention a date, time, event, or deadline | Calendar events, Google Tasks, or pending decisions |
 | Brightspace | Your private D2L calendar feed | Tasks for due dates, events for exams, and decisions for optional timed events |
-| Gradescope | Upcoming assignments from your current courses | Google Tasks for unsubmitted assignments |
+| Gradescope | Upcoming assignments from your current courses, plus submission receipt emails | Google Tasks for unsubmitted assignments, ticked off once you submit |
 | Your replies | Plain-language commands sent in response to MailBrah emails | Accepted events, declined events, new events, or new deadlines |
 
-By default, the main scan runs every five minutes. Gradescope is checked at most every three hours, and Brightspace is checked at most once per hour.
+By default, the main scan runs every five minutes. Gradescope is checked at most every three hours, or right away when a submission receipt arrives, and Brightspace is checked at most once per hour.
 
 ## How MailBrah decides what to do
 
@@ -100,6 +100,9 @@ Gemini extraction
 Brightspace calendar feed ----+
                                |
 Gradescope assignment pages --+----> Duplicate check ----> Calendar or Tasks
+         ^                     |
+         |                     +----> Submitted? ---------> Task ticked off
+Gradescope submission receipt
 ```
 
 The prefilter avoids sending ordinary email to Gemini when it contains no sign of a date, time, event, or deadline. This saves API calls and keeps routine scans quick.
@@ -262,7 +265,19 @@ testGradescope()
 
 The test logs the courses and upcoming unsubmitted assignments it finds. It does not create tasks.
 
-Once configured, the normal inbox scan checks Gradescope at most every three hours. By default it reads up to eight courses from the newest term shown on the account page. Submitted and past-due assignments are skipped.
+Once configured, the normal inbox scan checks Gradescope at most every three hours. By default it reads up to eight courses from the newest term shown on the account page. Past-due assignments are skipped.
+
+### Ticking off submissions
+
+Gradescope emails a receipt from no-reply@gradescope.com after every submission. When one of those lands in the inbox MailBrah scans, MailBrah re-reads that course on the next scan, usually within five minutes, and marks the matching Google Task as completed. The task shows struck through in Calendar's task row and in Google Tasks.
+
+The receipt is only a trigger. MailBrah does not read the assignment name out of the email; it trusts the "Submitted" status on the course page, matched against the task it created for that assignment. This also means Online Assignments, which send no receipt, still get ticked off on the regular three-hour check.
+
+Matching is exact on the "COURSE — Assignment" title MailBrah built when it created the task, with a fallback to a similar title due within 30 minutes for tasks that came from Brightspace or an email instead. A ticked-off task is remembered, so it is never marked twice and a later due-date change on Gradescope does not move it.
+
+Google Calendar itself has no way to complete a task; this uses the Google Tasks API, which MailBrah already has permission for. In the rare case where Tasks was unavailable and a deadline became an all-day event instead, that event gets a "✓ " prefix.
+
+Run `testGradescopeCompletion()` to see which tasks the next scan would tick off without changing anything.
 
 ## Brightspace setup
 
@@ -322,6 +337,7 @@ If the Google Cloud project associated with your Gemini key has no billing accou
 | `dryRunLatest()` | Extracts events from the newest USC email without writing anything |
 | `runDiagnostics()` | Checks Gemini, Gmail, Calendar, Tasks, triggers, integrations, and stored state |
 | `testGradescope()` | Lists upcoming Gradescope assignments without creating tasks |
+| `testGradescopeCompletion()` | Lists submitted Gradescope assignments and the tasks they would tick off, without changing anything |
 | `testBrightspace()` | Classifies Brightspace feed entries without creating anything |
 | `testTaskCreation()` | Creates one real test task |
 | `seedTestCard()` | Creates sample pending items and sends a test notification |
@@ -385,7 +401,7 @@ MailBrah can automatically correct the time of a same-title item on the same dat
 | `PendingStore.js` | Storage and expiration of pending decisions |
 | `Replies.js` | Plain-language email commands and confirmations |
 | `AddonUI.js` | Gmail add-on cards and decision buttons |
-| `Gradescope.js` | Gradescope login, course parsing, and assignment sync |
+| `Gradescope.js` | Gradescope login, course parsing, assignment sync, and ticking off submissions |
 | `Brightspace.js` | Brightspace calendar feed parsing and classification |
 | `Setup.js` | Installation, diagnostics, test helpers, and state reset |
 | `appsscript.json` | Apps Script runtime, permissions, services, and add-on configuration |

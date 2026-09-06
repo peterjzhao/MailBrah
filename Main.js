@@ -53,7 +53,7 @@ function processInboxLocked_() {
   var failCounts = getFailCounts_();
   var prefilter = buildPrefilter_();
   var llmCalls = 0;
-  var stats = { emails: 0, added: [], updated: [], pendingNew: [], dupes: 0, ignored: 0, skipped: 0, errors: 0 };
+  var stats = { emails: 0, added: [], updated: [], completed: [], pendingNew: [], dupes: 0, ignored: 0, skipped: 0, errors: 0 };
 
   // Act on reply commands first, so decisions land before new pending items
   // pile on top of them. A failure here never blocks the email scan.
@@ -144,9 +144,12 @@ function processInboxLocked_() {
   }
 
   // Gradescope + Brightspace deadline syncs (every few hours; cheap, no LLM
-  // calls). A failure in either never affects email processing.
+  // calls). A Gradescope submission receipt in the inbox re-checks that
+  // course right away so its task gets ticked off. A failure in either
+  // never affects email processing.
   if (gradescopeConfigured_() && Date.now() < deadline) {
     try {
+      processGradescopeReceipts_(stats);
       processGradescope_(stats);
     } catch (err) {
       Logger.log('Gradescope sync failed (emails unaffected): %s', err);
@@ -178,8 +181,8 @@ function processInboxLocked_() {
       Logger.log('Urgent notification failed (run state already saved): %s', err);
     }
   }
-  Logger.log('MailBrah run: %s analyzed, %s skipped by pre-filter, %s added, %s time-updated, %s pending, %s dupes, %s ignored, %s errors',
-    stats.emails, stats.skipped, stats.added.length, stats.updated.length,
+  Logger.log('MailBrah run: %s analyzed, %s skipped by pre-filter, %s added, %s time-updated, %s ticked off, %s pending, %s dupes, %s ignored, %s errors',
+    stats.emails, stats.skipped, stats.added.length, stats.updated.length, stats.completed.length,
     stats.pendingNew.length, stats.dupes, stats.ignored, stats.errors);
   return stats;
 }

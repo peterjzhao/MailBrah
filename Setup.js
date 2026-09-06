@@ -113,6 +113,31 @@ function testGradescope() {
 }
 
 /**
+ * Dry run for ticking off submissions: lists every SUBMITTED Gradescope
+ * assignment and which task (if any) the next scan would mark complete.
+ * Changes NOTHING — no task is patched and MailBrah's memory is untouched.
+ */
+function testGradescopeCompletion() {
+  var courses = gsListCourses_();
+  var would = 0;
+  courses.forEach(function (course) {
+    var submitted = gsListAssignments_(course.id).filter(function (a) { return a.submitted; });
+    submitted.forEach(function (a) {
+      var title = course.shortName + ' — ' + a.title;
+      var found = gsFindSubmittedTask_(title, a.due);
+      if (found) {
+        would++;
+        Logger.log('  WOULD TICK OFF: "%s" -> %s', title, found.entry.a);
+      } else {
+        Logger.log('  no open task for "%s" (never created, already done, or already pruned)', title);
+      }
+    });
+    if (!submitted.length) Logger.log('  %s — no submitted assignments.', course.shortName);
+  });
+  Logger.log('%s task(s) would be ticked off on the next scan. Nothing was changed.', would);
+}
+
+/**
  * Dry run for Brightspace: fetches your calendar feed and logs how each entry
  * would be handled (task / event / ask / skipped). Creates NO tasks — logs only.
  * Requires CONFIG.BRIGHTSPACE_ICS_URL to be set in Config.

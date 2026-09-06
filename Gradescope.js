@@ -1,6 +1,8 @@
 /**
  * Gradescope deadline sync (screen-scrape — Gradescope has no API or calendar
- * feed, and sends no assignment/due-date emails, so this is the only way).
+ * feed, and emails nothing about new assignments or due dates, so this is
+ * the only way). It does email a receipt after each submission; that is
+ * used as a trigger, not as data (see processGradescopeReceipts_).
  *
  * Flow (mirrors the community scrapers, verified against the live site):
  *   GET /login  -> CSRF token + session cookie
@@ -9,7 +11,8 @@
  *   GET /courses/<id> -> #assignments-student-table rows with
  *                        <time class="submissionTimeChart--dueDate" datetime>
  *
- * Unsubmitted future assignments become Google Tasks via createDeadlineTask_.
+ * Unsubmitted future assignments become Google Tasks via createDeadlineTask_;
+ * submitted ones tick off the task MailBrah created (status=completed).
  * Cookies are cached in Script Properties; login is repeated only on expiry.
  * Everything is wrapped so a Gradescope failure never affects email processing.
  */
@@ -22,8 +25,10 @@ function gradescopeConfigured_() {
 }
 
 /**
- * Scrape and sync. Called from the locked trigger run; also fine manually.
- * @param {Object} stats the run's stats object (adds task titles to .added)
+ * Scrape and sync every course. Called from the locked trigger run on the
+ * GS_SCAN_EVERY_HOURS cadence; also fine manually.
+ * @param {Object} stats the run's stats object (adds titles to .added,
+ *   .updated and .completed)
  */
 function processGradescope_(stats) {
   var props = PropertiesService.getScriptProperties();
@@ -32,34 +37,44 @@ function processGradescope_(stats) {
 
   var courses = gsListCourses_();
   Logger.log('Gradescope: scanning %s course(s)…', courses.length);
+  courses.forEach(function (course) { gsSyncCourse_(course, stats); });
+  props.setProperty(PROPS.GS_LAST, String(Date.now()));
+}
+
+/**
+ * One course: submitted assignments tick off the task MailBrah created for
+ * them; unsubmitted future ones become tasks (or move, if the due time
+ * changed on Gradescope).
+ * @param {Object} course {id, shortName}
+ * @param {Object} stats the run's stats object
+ */
+function gsSyncCourse_(course, stats) {
   var now = Date.now();
   var horizon = now + CONFIG.MAX_EVENT_HORIZON_DAYS * 24 * 3600 * 1000;
-
-  courses.forEach(function (course) {
-    gsListAssignments_(course.id).forEach(function (a) {
-      if (a.submitted) return;                       // already turned in
-      if (a.due.getTime() < now) return;             // past due
-      if (a.due.getTime() > horizon) return;
-      var title = course.shortName + ' — ' + a.title;
-      var end = new Date(a.due.getTime() + 60 * 60 * 1000);
-      if (tryReschedule_(title, a.due, end)) {       // due time changed on Gradescope
-        stats.updated.push(title);
-        return;
-      }
-      if (isDuplicate_(title, a.due, end)) return;   // task/email already handled it
-      createDeadlineTask_({
-        title: title,
-        start: a.due,
-        description: 'Gradescope assignment for ' + course.shortName,
-        sourceSubject: 'Gradescope: ' + course.shortName
-      });
-      stats.added.push(title);
-      Logger.log('Gradescope: task added — %s (due %s)', title,
-        Utilities.formatDate(a.due, CONFIG.TIMEZONE, 'MMM d h:mm a'));
+  gsListAssignments_(course.id).forEach(function (a) {
+    var title = course.shortName + ' — ' + a.title;
+    if (a.submitted) {                               // turned in: tick it off
+      if (gsMarkSubmitted_(title, a.due)) stats.completed.push(title);
+      return;
+    }
+    if (a.due.getTime() < now) return;               // past due
+    if (a.due.getTime() > horizon) return;
+    var end = new Date(a.due.getTime() + 60 * 60 * 1000);
+    if (tryReschedule_(title, a.due, end)) {         // due time changed on Gradescope
+      stats.updated.push(title);
+      return;
+    }
+    if (isDuplicate_(title, a.due, end)) return;     // task/email already handled it
+    createDeadlineTask_({
+      title: title,
+      start: a.due,
+      description: 'Gradescope assignment for ' + course.shortName,
+      sourceSubject: 'Gradescope: ' + course.shortName
     });
+    stats.added.push(title);
+    Logger.log('Gradescope: task added — %s (due %s)', title,
+      Utilities.formatDate(a.due, CONFIG.TIMEZONE, 'MMM d h:mm a'));
   });
-
-  props.setProperty(PROPS.GS_LAST, String(Date.now()));
 }
 
 // ---- Courses & assignments ----
@@ -208,4 +223,126 @@ function gsMergeCookies_(map, response) {
 
 function gsCookieHeader_(map) {
   return Object.keys(map).map(function (k) { return k + '=' + map[k]; }).join('; ');
+}
+
+// ---- Submission receipts ----
+
+/**
+ * A submission receipt (no-reply@gradescope.com) is the trigger for an
+ * immediate re-check: the course linked from the receipt is re-scraped right
+ * away — bypassing the GS_SCAN_EVERY_HOURS throttle — so the task is ticked
+ * off within one scan instead of up to three hours later. The email text is
+ * NOT parsed for the assignment name: the scraped submission status is the
+ * source of truth (exact, and it also covers Online Assignments, which send
+ * no receipt at all — the regular scan catches those).
+ *
+ * Receipts are marked seen and labelled before the re-check, so a Gradescope
+ * outage costs at most the instant tick — the regular scan still catches it.
+ * These messages never reach Gemini.
+ */
+function processGradescopeReceipts_(stats) {
+  var threads = GmailApp.search(CONFIG.GS_RECEIPT_QUERY, 0, 10);
+  if (!threads.length) return;
+  var label = GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL) ||
+    GmailApp.createLabel(CONFIG.PROCESSED_LABEL);
+  var seenIds = getSeenMessageIds_();
+  var linked = {};
+  var fresh = 0;
+  threads.forEach(function (thread) {
+    thread.getMessages().forEach(function (msg) {
+      if (seenIds.indexOf(msg.getId()) !== -1) return;
+      fresh++;
+      gsReceiptCourseIds_(msg.getPlainBody()).forEach(function (id) { linked[id] = true; });
+      seenIds.push(msg.getId());
+    });
+    thread.addLabel(label);
+  });
+  if (!fresh) return;
+  saveSeenMessageIds_(seenIds);
+
+  var courses = gsListCourses_();
+  var targets = courses.filter(function (c) { return linked[c.id]; });
+  if (!targets.length) targets = courses; // no usable link: check everything
+  Logger.log('Gradescope: %s submission receipt(s) — re-checking %s course(s) now.',
+    fresh, targets.length);
+  targets.forEach(function (course) { gsSyncCourse_(course, stats); });
+}
+
+/** Unique Gradescope course IDs linked from an email body ([] if none). */
+function gsReceiptCourseIds_(body) {
+  var ids = [];
+  var re = /gradescope\.com\/courses\/(\d+)/g;
+  var m;
+  while ((m = re.exec(String(body || ''))) !== null) {
+    if (ids.indexOf(m[1]) === -1) ids.push(m[1]);
+  }
+  return ids;
+}
+
+// ---- Ticking off submitted assignments ----
+
+/**
+ * The task MailBrah created for this assignment, if any: exact match on the
+ * "COURSE — Assignment" title first (the same string built when the task was
+ * created), then the fuzzy rule isDuplicate_ uses — similar title, due within
+ * 30 min — for a task Brightspace or an email created under another name.
+ * @return {?Object} {fp, entry} or null
+ */
+function gsFindSubmittedTask_(title, due) {
+  var norm = normalizeTitle_(title).slice(0, 80);
+  var decided = getDecided_();
+  var fps = Object.keys(decided);
+  var open = fps.filter(function (fp) {
+    var e = decided[fp];
+    return e.d === 'added' && !!e.a;
+  });
+  // Exact title: if the name repeats across weeks, take the one due closest.
+  var best = null;
+  for (var i = 0; i < open.length; i++) {
+    var x = decided[open[i]];
+    if (x.t !== norm) continue;
+    var gap = Math.abs(x.s - due.getTime());
+    if (!best || gap < best.gap) best = { fp: open[i], entry: x, gap: gap };
+  }
+  if (best) return { fp: best.fp, entry: best.entry };
+  for (var j = 0; j < open.length; j++) {
+    var e = decided[open[j]];
+    if (Math.abs(e.s - due.getTime()) <= 30 * 60 * 1000 && titleSimilarity_(title, e.t) >= 0.6) {
+      return { fp: open[j], entry: e };
+    }
+  }
+  return null;
+}
+
+/**
+ * Tick off the task for a submitted assignment. Tasks get status=completed
+ * (struck through in Calendar's task row and in Tasks); the rare all-day
+ * event fallback can't be completed, so it gets a "✓ " prefix instead.
+ * The decided entry is marked 'done' either way, so the task is never
+ * patched twice and a later due-date change can't "reschedule" it.
+ * @return {boolean} true if something was ticked off just now
+ */
+function gsMarkSubmitted_(title, due) {
+  var found = gsFindSubmittedTask_(title, due);
+  if (!found) return false;
+  var entry = found.entry;
+  var done = false;
+  try {
+    if (entry.a.indexOf('t:') === 0) {
+      Tasks.Tasks.patch({ status: 'completed' }, '@default', entry.a.slice(2));
+      done = true;
+    } else if (entry.a.indexOf('c:') === 0) {
+      var ev = getCalendar_().getEventById(entry.a.slice(2));
+      if (ev) {
+        if (ev.getTitle().indexOf('✓ ') !== 0) ev.setTitle('✓ ' + ev.getTitle());
+        done = true;
+      }
+    }
+  } catch (err) {
+    Logger.log('Gradescope: "%s" is submitted but its task could not be marked done (%s) — it may have been deleted.', title, err);
+  }
+  entry.d = 'done';
+  PropertiesService.getScriptProperties().setProperty(DECIDED_PREFIX + found.fp, JSON.stringify(entry));
+  if (done) Logger.log('Gradescope: ticked off — %s', title);
+  return done;
 }
