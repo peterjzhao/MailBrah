@@ -125,7 +125,10 @@ function decidePending_(id, accept) {
       location: p.location, description: p.description,
       sourceSubject: p.sourceSubject, sourceMsgId: p.sourceMsgId
     });
-    return { ok: true, message: 'Added: ' + p.title };
+    var conflictNote = (p.conflicts && p.conflicts.length)
+      ? ' — heads up: overlaps ' + p.conflicts[0]
+      : '';
+    return { ok: true, message: 'Added: ' + p.title + conflictNote };
   } catch (err) {
     restorePending_(p);
     return { ok: false, message: 'Couldn\'t save "' + p.title + '" — try again. (' + err + ')' };

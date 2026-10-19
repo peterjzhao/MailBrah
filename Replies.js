@@ -10,29 +10,25 @@
  * anything else the reply asks to add is created directly. MailBrah answers
  * in-thread with a confirmation of what it did.
  *
- * Loop safety: MailBrah's own messages all start with "MailBrah" and are
- * skipped; every processed message id goes into the seen cache.
+ * Loop safety: every MailBrah-authored message has a first line of exactly
+ * "MailBrah" (isMailBrahMessage_) and is skipped; every processed message id
+ * goes into the seen cache. A command that fails still gets an answer —
+ * silence is never an outcome.
  */
 
 function processReplies_(stats) {
   var threads = GmailApp.search('subject:mailbrah newer_than:3d', 0, 10);
   var seenIds = getSeenMessageIds_();
-  // Threads with no message newer than the previous run were fully handled
-  // already — skip them without fetching their messages (keeps idle runs
-  // cheap at a 5-minute cadence). 15-min slack covers run overlap.
-  var watermark = Number(PropertiesService.getScriptProperties()
-    .getProperty(PROPS.LAST_RUN) || 0) - 15 * 60 * 1000;
   var handled = 0;
 
   for (var t = 0; t < threads.length; t++) {
-    if (threads[t].getLastMessageDate().getTime() < watermark) continue;
     var messages = threads[t].getMessages();
     for (var m = 0; m < messages.length; m++) {
       var msg = messages[m];
       if (seenIds.indexOf(msg.getId()) !== -1) continue;
 
       var text = extractReplyText_(msg.getPlainBody());
-      if (!text || text.indexOf('MailBrah') === 0) {
+      if (!text || isMailBrahMessage_(text)) {
         // Our own notification/confirmation — just remember it.
         seenIds.push(msg.getId());
         saveSeenMessageIds_(seenIds);
@@ -40,15 +36,30 @@ function processReplies_(stats) {
       }
       if (handled >= CONFIG.MAX_REPLY_COMMANDS_PER_RUN) continue; // NOT marked seen: retried next run
 
+      // The nearest earlier MailBrah message in this thread is what the user
+      // is replying to — context for "these two" / "both" references.
+      var repliedTo = '';
+      for (var back = m - 1; back >= 0; back--) {
+        var priorBody = String(messages[back].getPlainBody() || '').trim();
+        if (isMailBrahMessage_(priorBody)) {
+          repliedTo = priorBody.slice(0, 1500);
+          break;
+        }
+      }
+
       handled++;
       try {
-        handleReplyCommand_(msg, text, stats);
+        handleReplyCommand_(msg, text, repliedTo, stats);
       } catch (err) {
         stats.errors++;
         Logger.log('Reply command failed ("%s…"): %s', text.slice(0, 60), err);
+        // Never go quiet: say it failed instead of dropping the command.
+        sendReplySafely_(msg, 'MailBrah\n\n- Sorry — I couldn\'t process that (' +
+          String(err).slice(0, 120) + '). Send it again in a few minutes, or use ' +
+          'the buttons on the MailBrah card.');
       } finally {
         // One attempt per command: marked seen even on failure so a broken
-        // reply can't loop forever; no confirmation email = it didn't work.
+        // reply can't loop forever.
         seenIds.push(msg.getId());
         saveSeenMessageIds_(seenIds);
       }
@@ -57,10 +68,32 @@ function processReplies_(stats) {
   if (handled) Logger.log('Processed %s reply command(s).', handled);
 }
 
-function handleReplyCommand_(msg, text, stats) {
+/**
+ * True for messages MailBrah itself sent: their first line is exactly
+ * "MailBrah" (see the digest, urgent notification, and confirmations). The
+ * user's replies come from the same address, so the body is the only tell.
+ */
+function isMailBrahMessage_(body) {
+  var text = String(body || '').trim();
+  if (/^MailBrah[ \t]*(\r?\n|$)/.test(text)) return true;
+  // First lines used by older versions; only matters for messages still
+  // inside the 3-day search window. Safe to delete a few days after deploying.
+  return /^(MailBrah just found |Good morning — (\d+ decision|nothing is waiting))/.test(text);
+}
+
+/** Reply in-thread; a send failure is logged, never thrown (run state is already saved). */
+function sendReplySafely_(msg, body) {
+  try {
+    msg.reply(body);
+  } catch (err) {
+    Logger.log('Could not send reply: %s', err);
+  }
+}
+
+function handleReplyCommand_(msg, text, repliedTo, stats) {
   Logger.log('Reply command: "%s"', text.slice(0, 200));
   var pending = listPending_();
-  var result = interpretReplyWithGemini_(text, pending);
+  var result = interpretReplyWithGemini_(text, pending, repliedTo);
   var lines = [];
 
   if (!result) {
@@ -74,27 +107,27 @@ function handleReplyCommand_(msg, text, stats) {
     (result.newEvents || []).forEach(function (evt) {
       lines.push(executeCommandedEvent_(evt, msg, stats));
     });
-    if (!lines.length) {
+    if (!lines.length && !result.wantsPendingList) {
       lines.push(result.note || 'Nothing actionable found in your reply.');
     } else if (result.note && /couldn|unclear|ambigu|not match|unsure/i.test(result.note)) {
       lines.push(result.note);
     }
+    if (result.wantsPendingList) {
+      var pendingNow = listPending_();
+      lines.push(pendingNow.length ? 'Currently pending:' : 'Nothing else is pending.');
+      pendingNow.forEach(function (p) {
+        lines.push('    ' + (p.kind === 'deadline' ? 'Due ' : '') +
+          Utilities.formatDate(new Date(p.startIso), CONFIG.TIMEZONE, 'EEE MMM d h:mm a') +
+          ' — ' + p.title);
+      });
+    }
   }
 
-  var body = 'MailBrah\n\n' +
+  // First line exactly "MailBrah": that's how the next scan knows this is
+  // ours and not a new command (isMailBrahMessage_).
+  sendReplySafely_(msg, 'MailBrah\n\n' +
     lines.map(function (l) { return '- ' + l; }).join('\n') +
-    '\n\nStill pending: ' + listPending_().length;
-  try {
-    var confirmation = msg.reply(body);
-    // Never re-read our own confirmation as a command.
-    if (confirmation && confirmation.getId) {
-      var ids = getSeenMessageIds_();
-      ids.push(confirmation.getId());
-      saveSeenMessageIds_(ids);
-    }
-  } catch (err) {
-    Logger.log('Could not send confirmation reply: %s', err);
-  }
+    '\n\nStill pending: ' + listPending_().length);
 }
 
 /** The user explicitly asked for this — create it (dup check still applies). */

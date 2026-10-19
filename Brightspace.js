@@ -14,8 +14,17 @@
  *   other timed entries (sessions, one-offs)      -> the Accept/Decline card
  */
 
+/**
+ * The feed URL lives in Script Properties (key BRIGHTSPACE_ICS_URL) so
+ * re-pasting Config can never wipe it; the CONFIG field is a fallback.
+ */
+function bsFeedUrl_() {
+  return PropertiesService.getScriptProperties().getProperty('BRIGHTSPACE_ICS_URL') ||
+    CONFIG.BRIGHTSPACE_ICS_URL || '';
+}
+
 function brightspaceConfigured_() {
-  return !!CONFIG.BRIGHTSPACE_ICS_URL;
+  return !!bsFeedUrl_();
 }
 
 /** @param {Object} stats the run's stats object (adds task titles to .added) */
@@ -29,21 +38,27 @@ function processBrightspace_(stats) {
   var now = Date.now();
   var horizon = now + CONFIG.MAX_EVENT_HORIZON_DAYS * 24 * 3600 * 1000;
 
+  var outcomes = { added: 0, dupes: 0, pending: 0, skipped: 0, past: 0, updated: 0 };
   events.forEach(function (ev) {
     var cls = bsClassify_(ev);
-    if (cls.type === 'skip') return;
+    if (cls.type === 'skip') { outcomes.skipped++; return; }
 
     if (cls.type === 'task') {
       var due = ev.allDay
         ? new Date(ev.start.getFullYear(), ev.start.getMonth(), ev.start.getDate(), 23, 59, 0)
         : ev.start;
-      if (due.getTime() < now || due.getTime() > horizon) return;
+      if (due.getTime() < now || due.getTime() > horizon) { outcomes.past++; return; }
       var dueEnd = new Date(due.getTime() + 60 * 60 * 1000);
       if (tryReschedule_(cls.title, due, dueEnd)) {
         stats.updated.push(cls.title);
+        outcomes.updated++;
         return;
       }
-      if (isDuplicate_(cls.title, due, dueEnd)) return;
+      if (isDuplicate_(cls.title, due, dueEnd)) {
+        Logger.log('Brightspace: duplicate (already a task/decision) — %s', cls.title);
+        outcomes.dupes++;
+        return;
+      }
       createDeadlineTask_({
         title: cls.title,
         start: due,
@@ -51,6 +66,7 @@ function processBrightspace_(stats) {
         sourceSubject: 'Brightspace calendar feed'
       });
       stats.added.push(cls.title);
+      outcomes.added++;
       Logger.log('Brightspace: task added — %s (due %s)', cls.title,
         Utilities.formatDate(due, CONFIG.TIMEZONE, 'MMM d h:mm a'));
       return;
@@ -59,12 +75,17 @@ function processBrightspace_(stats) {
     // Timed entry: 'event' (exam-like -> auto) or 'ask' (you decide).
     var start = ev.start;
     var end = (ev.end && ev.end > start) ? ev.end : new Date(start.getTime() + 60 * 60 * 1000);
-    if (end.getTime() < now || start.getTime() > horizon) return;
+    if (end.getTime() < now || start.getTime() > horizon) { outcomes.past++; return; }
     if (tryReschedule_(cls.title, start, end)) {
       stats.updated.push(cls.title);
+      outcomes.updated++;
       return;
     }
-    if (isDuplicate_(cls.title, start, end)) return;
+    if (isDuplicate_(cls.title, start, end)) {
+      Logger.log('Brightspace: duplicate — %s', cls.title);
+      outcomes.dupes++;
+      return;
+    }
 
     var conflicts = findConflicts_(start, end);
     if (cls.type === 'event' && conflicts.length === 0) {
@@ -74,6 +95,7 @@ function processBrightspace_(stats) {
         sourceSubject: 'Brightspace calendar feed', sourceMsgId: ''
       });
       stats.added.push(cls.title);
+      outcomes.added++;
       Logger.log('Brightspace: event added — %s', cls.title);
       return;
     }
@@ -95,19 +117,25 @@ function processBrightspace_(stats) {
       createdAt: Date.now()
     });
     if (added) {
+      outcomes.pending++;
+      Logger.log('Brightspace: queued for your decision — %s', cls.title);
       stats.pendingNew.push({
         title: cls.title,
         startsToday: Utilities.formatDate(start, CONFIG.TIMEZONE, 'yyyyMMdd') ===
           Utilities.formatDate(new Date(), CONFIG.TIMEZONE, 'yyyyMMdd')
       });
+    } else {
+      outcomes.dupes++;
     }
   });
 
+  Logger.log('Brightspace sync: %s added, %s duplicates, %s queued for decision, %s time-updated, %s past/far, %s skipped (availability/sessions).',
+    outcomes.added, outcomes.dupes, outcomes.pending, outcomes.updated, outcomes.past, outcomes.skipped);
   props.setProperty(PROPS.BS_LAST, String(Date.now()));
 }
 
 function bsFetchFeed_() {
-  var response = UrlFetchApp.fetch(CONFIG.BRIGHTSPACE_ICS_URL, { muteHttpExceptions: true });
+  var response = UrlFetchApp.fetch(bsFeedUrl_(), { muteHttpExceptions: true });
   if (response.getResponseCode() !== 200) {
     throw new Error('Brightspace feed returned HTTP ' + response.getResponseCode() +
       ' — re-copy the feed URL from Brightspace Calendar > Settings.');

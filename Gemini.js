@@ -1,6 +1,10 @@
 /**
  * Gemini API client (free tier, plain REST via UrlFetchApp).
  *
+ * Every call walks CONFIG.LLM_CHAIN top to bottom: the newest Flash model
+ * first, older ones only when it is overloaded or rate-limited. The key
+ * lives in Script Properties as GEMINI_API_KEY.
+ *
  * Two jobs:
  *  - extractEventsWithGemini(email): pull events/deadlines out of one email.
  *  - interpretReplyWithGemini_(replyText, pending): turn a plain-words reply
@@ -53,9 +57,10 @@ var GEMINI_REPLY_SCHEMA = {
       description: 'Events/deadlines the user asked to add that are NOT on the pending list',
       items: GEMINI_EVENT_ITEM_SCHEMA
     },
+    wantsPendingList: { type: 'boolean', description: 'true if the user asked to see what is pending ("what are the others?", "what else is there?")' },
     note: { type: 'string', description: 'One short sentence: what was understood, plus anything that could not be matched or was ambiguous' }
   },
-  required: ['decisions', 'newEvents', 'note']
+  required: ['decisions', 'newEvents', 'wantsPendingList', 'note']
 };
 
 /**
@@ -99,7 +104,7 @@ function extractEventsWithGemini(email) {
     truncateForPrompt_(email.body, 9000)
   ].join('\n');
 
-  var parsed = callGemini_(prompt, GEMINI_EVENTS_SCHEMA);
+  var parsed = callLLM_(prompt, GEMINI_EVENTS_SCHEMA);
   if (!parsed) return [];
   return (parsed.events || []).filter(function (evt) {
     return evt && evt.title && evt.startLocal;
@@ -110,9 +115,11 @@ function extractEventsWithGemini(email) {
  * Interpret a plain-words reply to a notification email.
  * @param {string} replyText the user's words (quoted text already stripped)
  * @param {Array<Object>} pending current pending items ({id, title, ...})
- * @return {Object|null} {decisions, newEvents, note}
+ * @param {string=} repliedTo the MailBrah message being replied to — lets
+ *   references like "these two" / "both" resolve to what that email listed
+ * @return {Object|null} {decisions, newEvents, wantsPendingList, note}
  */
-function interpretReplyWithGemini_(replyText, pending) {
+function interpretReplyWithGemini_(replyText, pending, repliedTo) {
   var todayLocal = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ss");
   var pendingLines = pending.map(function (p, i) {
     var when = Utilities.formatDate(new Date(p.startIso), CONFIG.TIMEZONE, 'EEE MMM d h:mm a');
@@ -127,6 +134,10 @@ function interpretReplyWithGemini_(replyText, pending) {
     'PENDING ITEMS (awaiting accept/decline):',
     pendingLines.length ? pendingLines.join('\n') : '(none)',
     '',
+    'THE MAILBRAH MESSAGE THE USER IS REPLYING TO (use it to resolve',
+    'references like "these two", "both", "the first one"):',
+    repliedTo ? truncateForPrompt_(repliedTo, 1200) : '(unavailable)',
+    '',
     'Rules:',
     '- Match references loosely — a single word or fragment is enough: "career"',
     '  means the career fair item, "alex" means the item mentioning Alex,',
@@ -137,6 +148,10 @@ function interpretReplyWithGemini_(replyText, pending) {
     '  decision for them. Only blanket phrases ("the rest", "everything else",',
     '  "all of them", "decline everything") cover unmentioned items.',
     '- "add"/"yes"/"accept"/"go" => accept: true; "decline"/"no"/"skip"/"ignore" => accept: false.',
+    '- "these"/"both"/"the two"/"them" refer to the items listed in the message',
+    '  being replied to — map them to the matching pending ids.',
+    '- If the user asks what else is pending ("what are the others?"), set',
+    '  wantsPendingList true — the assistant appends the list to its reply.',
     '- Anything the user wants added that is NOT a pending item (e.g. "also add',
     '  dinner with Alex Friday 7pm") goes in newEvents, times local to ' + CONFIG.TIMEZONE + '.',
     '- Times in newEvents: if the user states a clock time, use it EXACTLY and',
@@ -148,14 +163,12 @@ function interpretReplyWithGemini_(replyText, pending) {
     '  no stated time is due 23:59 that day (timeGiven false).',
     '- newEvents titles: course items follow "COURSE — Task"; personal errands',
     '  keep a plain short title ("Get Altoids"). No location/date/time in titles.',
-    '- Only act on what the reply actually says. If the reply is not an',
-    '  instruction at all, return empty arrays and say so in note.',
     '',
     'REPLY:',
     truncateForPrompt_(replyText, 2000)
   ].join('\n');
 
-  var parsed = callGemini_(prompt, GEMINI_REPLY_SCHEMA);
+  var parsed = callLLM_(prompt, GEMINI_REPLY_SCHEMA);
   if (!parsed) return null;
   var validIds = {};
   pending.forEach(function (p) { validIds[p.id] = true; });
@@ -166,86 +179,122 @@ function interpretReplyWithGemini_(replyText, pending) {
   return parsed;
 }
 
-/**
- * Shared Gemini call: model fallback chain + structured-output syntax
- * fallback + retry with backoff. Returns the parsed JSON object, or null if
- * the model returned nothing usable. Throws on transport-level failure.
- */
-function callGemini_(prompt, schema) {
-  var apiKey = PropertiesService.getScriptProperties().getProperty(PROPS.API_KEY);
-  if (!apiKey) {
-    throw new Error('GEMINI_API_KEY is not set. Run setApiKey() in Setup.js or add it under Project Settings > Script Properties.');
-  }
+// ---- Provider layer ----
 
+// Keyed by the `provider` field of CONFIG.LLM_CHAIN entries. Gemini-only;
+// another provider would be one more entry here plus its host in
+// appsscript.json's urlFetchWhitelist.
+var LLM_PROVIDERS = {
+  gemini: { keyProp: 'GEMINI_API_KEY', call: geminiCall_ }
+};
+
+/**
+ * Walk the chain: skip unconfigured providers, fall through on failure.
+ * Every entry but the last fails fast (no in-place retry sleeps) — the next
+ * model answers sooner than a busy one recovers. Returns the parsed JSON
+ * object, or null if a provider answered with unusable output and no one
+ * else could do better. Throws only when every configured provider failed
+ * at the transport level.
+ */
+function callLLM_(prompt, schema) {
+  var props = PropertiesService.getScriptProperties();
+  var lastErr = null;
+  var sawKey = false;
+  var chain = CONFIG.LLM_CHAIN;
+
+  for (var i = 0; i < chain.length; i++) {
+    var entry = chain[i];
+    var spec = LLM_PROVIDERS[entry.provider];
+    if (!spec) continue;
+    var key = props.getProperty(spec.keyProp);
+    if (!key) continue; // provider not configured — skip
+    sawKey = true;
+    try {
+      var failFast = i < chain.length - 1;
+      var parsed = spec.call(entry, spec, key, prompt, schema, failFast);
+      if (parsed) {
+        if (i > 0) Logger.log('LLM: answered by fallback %s/%s.', entry.provider, entry.model);
+        return parsed;
+      }
+      lastErr = new Error(entry.provider + '/' + entry.model + ' returned unusable output');
+      Logger.log('%s — trying next in chain.', lastErr.message);
+    } catch (err) {
+      lastErr = err;
+      Logger.log('%s/%s failed (%s) — trying next in chain.',
+        entry.provider, entry.model, String(err).slice(0, 140));
+    }
+  }
+  if (!sawKey) {
+    throw new Error('GEMINI_API_KEY is not set. Run setApiKey() in Setup.js or add it ' +
+      'under Project Settings > Script Properties.');
+  }
+  throw lastErr || new Error('All LLM providers in the chain failed.');
+}
+
+/** Gemini generateContent: structured JSON at a configurable thinking level. */
+function geminiCall_(entry, spec, key, prompt, schema, failFast) {
   var contents = [{ role: 'user', parts: [{ text: prompt }] }];
+  // No temperature: Gemini 3 models want their default (Google's migration
+  // notes say to drop temperature/top_p/top_k; low values make them loop).
+  // thinkingLevel is the latency knob — see CONFIG.GEMINI_THINKING_LEVEL.
+  var base = {};
+  if (CONFIG.GEMINI_THINKING_LEVEL) {
+    base.thinkingConfig = { thinkingLevel: CONFIG.GEMINI_THINKING_LEVEL };
+  }
   // The classic responseMimeType/responseSchema syntax is what the live API
   // actually accepts; the newer documented responseFormat form is the fallback.
   var payloads = [
     {
       contents: contents,
-      generationConfig: {
-        temperature: 0.1,
+      generationConfig: Object.assign({}, base, {
         responseMimeType: 'application/json',
         responseSchema: schema
-      }
+      })
     },
     {
       contents: contents,
-      generationConfig: {
-        temperature: 0.1,
+      generationConfig: Object.assign({}, base, {
         responseFormat: { text: { mimeType: 'application/json', schema: schema } }
-      }
+      })
     }
   ];
+  var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
+    entry.model + ':generateContent';
 
-  // Model fallback: the primary model can shed free-tier load (HTTP 503) or
-  // rate-limit (429); when that happens, drop down the chain for this call.
-  var models = [CONFIG.GEMINI_MODEL].concat(CONFIG.GEMINI_FALLBACK_MODELS || []);
   var response = null;
-  for (var mi = 0; mi < models.length && !response; mi++) {
-    var url = 'https://generativelanguage.googleapis.com/v1beta/models/' +
-      models[mi] + ':generateContent';
-    for (var i = 0; i < payloads.length && !response; i++) {
-      try {
-        response = fetchWithRetry_(url, {
-          method: 'post',
-          contentType: 'application/json',
-          headers: { 'x-goog-api-key': apiKey },
-          payload: JSON.stringify(payloads[i]),
-          muteHttpExceptions: true
-        });
-      } catch (err) {
-        var msg = String(err);
-        if (msg.indexOf('HTTP 400') !== -1 && i + 1 < payloads.length) {
-          Logger.log('Structured-output syntax rejected; retrying with the alternate form.');
-          continue;
-        }
-        if (/HTTP (503|429)/.test(msg) && mi + 1 < models.length) {
-          Logger.log('%s is overloaded — falling back to %s.', models[mi], models[mi + 1]);
-          break;
-        }
-        throw err;
+  for (var i = 0; i < payloads.length && !response; i++) {
+    try {
+      response = fetchWithRetry_(url, {
+        method: 'post',
+        contentType: 'application/json',
+        headers: { 'x-goog-api-key': key },
+        payload: JSON.stringify(payloads[i]),
+        muteHttpExceptions: true
+      }, failFast);
+    } catch (err) {
+      if (String(err).indexOf('HTTP 400') !== -1 && i + 1 < payloads.length) {
+        Logger.log('Gemini rejected structured-output syntax; retrying with the alternate form.');
+        continue;
       }
+      throw err;
     }
   }
-  if (!response) throw new Error('All Gemini models overloaded — will retry next run.');
 
   var data = JSON.parse(response.getContentText());
   var candidate = data.candidates && data.candidates[0];
   var parts = (candidate && candidate.content && candidate.content.parts) || [];
-  // Join all non-"thought" text parts — long JSON can arrive split across parts.
   var text = parts
     .filter(function (p) { return p && p.text && !p.thought; })
     .map(function (p) { return p.text; })
     .join('');
   if (!text) {
-    Logger.log('Gemini returned no content: %s', response.getContentText().slice(0, 500));
+    Logger.log('Gemini returned no content: %s', response.getContentText().slice(0, 300));
     return null;
   }
   try {
     return JSON.parse(text);
   } catch (err2) {
-    Logger.log('Gemini returned unparseable JSON: %s', text.slice(0, 500));
+    Logger.log('Gemini returned unparseable JSON: %s', text.slice(0, 300));
     return null;
   }
 }
@@ -253,9 +302,11 @@ function callGemini_(prompt, schema) {
 /**
  * Fetch with exponential backoff on 429/5xx. Throws on persistent failure.
  * Total sleep is kept short (16s) so a run can't blow the 6-min execution cap.
+ * failFast: one attempt, no sleeps — the caller has another model to try,
+ * and moving on beats waiting for a busy one.
  */
-function fetchWithRetry_(url, options) {
-  var delaysMs = [0, 4000, 12000];
+function fetchWithRetry_(url, options, failFast) {
+  var delaysMs = failFast ? [0] : [0, 4000, 12000];
   var lastResponse = null;
   for (var i = 0; i < delaysMs.length; i++) {
     if (delaysMs[i] > 0) Utilities.sleep(delaysMs[i]);
@@ -264,7 +315,7 @@ function fetchWithRetry_(url, options) {
     if (code >= 200 && code < 300) return lastResponse;
     if (code !== 429 && code < 500) break; // non-retryable client error
   }
-  throw new Error('Gemini API request failed (HTTP ' + lastResponse.getResponseCode() +
+  throw new Error('LLM API request failed (HTTP ' + lastResponse.getResponseCode() +
     '): ' + lastResponse.getContentText().slice(0, 300));
 }
 

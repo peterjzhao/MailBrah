@@ -276,12 +276,19 @@ function handleExtractedEvent_(evt, msg, stats) {
   }
 }
 
-/** Immediate email — only for newly discovered items happening TODAY. */
+/**
+ * Immediate email — only for newly discovered items happening TODAY.
+ * Every email MailBrah sends starts with a line that is exactly "MailBrah":
+ * that's how processReplies_ tells our own messages from the user's replies
+ * (same address either way — see isMailBrahMessage_ in Replies.js).
+ */
 function sendUrgentNotification_(titles) {
   var me = notificationRecipient_();
   if (!me) return;
   var body = [
-    'MailBrah just found ' + (titles.length === 1 ? 'something' : titles.length + ' things') +
+    'MailBrah',
+    '',
+    'Just found ' + (titles.length === 1 ? 'something' : titles.length + ' things') +
       ' happening TODAY:',
     '',
     titles.map(function (t) { return '  • ' + t; }).join('\n'),
@@ -308,6 +315,8 @@ function sendDailyDigest() {
       ? 'Last inbox scan: ' + Utilities.formatDate(new Date(Number(lastRun)), CONFIG.TIMEZONE, 'EEE, MMM d · h:mm a')
       : 'Last inbox scan: never — run processInbox()';
     var emptyBody = [
+      'MailBrah', // first line must stay exactly this — see sendUrgentNotification_
+      '',
       'Good morning — nothing is waiting for a decision.',
       '',
       lastScan,
@@ -325,6 +334,8 @@ function sendDailyDigest() {
       (p.conflicts && p.conflicts.length ? '  [conflicts with ' + p.conflicts[0] + ']' : '');
   });
   var body = [
+    'MailBrah', // first line must stay exactly this — see sendUrgentNotification_
+    '',
     'Good morning — ' + pending.length + ' decision(s) waiting:',
     '',
     lines.join('\n'),

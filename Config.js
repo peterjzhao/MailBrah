@@ -22,14 +22,25 @@ var CONFIG = {
   // Keep in sync with "timeZone" in appsscript.json.
   TIMEZONE: 'America/Los_Angeles',
 
-  // Gemini model to use. Free-tier models (no billing needed) as of Aug 2026:
-  // 'gemini-3.7-flash' (default), 'gemini-3.5-flash', 'gemini-3.5-flash-lite'
-  // (higher free quota). Check limits at https://aistudio.google.com/rate-limit
-  GEMINI_MODEL: 'gemini-3.7-flash',
+  // Gemini models, tried top to bottom on every call: the newest Flash first,
+  // older ones only when it is overloaded (HTTP 503) or rate-limited (429) —
+  // and it moves on immediately instead of sleeping, so a busy model never
+  // stalls a run. Free tier, no billing needed (as of Sep 2026):
+  // gemini-3.8-flash (GA Sep 2, 2026), gemini-3.7-flash, gemini-3.5-flash-lite.
+  // Check your limits at https://aistudio.google.com/rate-limit
+  // The key lives in Script Properties as GEMINI_API_KEY (see Setup.js).
+  LLM_CHAIN: [
+    { provider: 'gemini', model: 'gemini-3.8-flash' },
+    { provider: 'gemini', model: 'gemini-3.7-flash' },
+    { provider: 'gemini', model: 'gemini-3.5-flash-lite' }
+  ],
 
-  // Tried in order when the model above is overloaded (HTTP 503) or
-  // rate-limited (HTTP 429) — the newest model sheds free-tier load first.
-  GEMINI_FALLBACK_MODELS: ['gemini-3.5-flash', 'gemini-3.5-flash-lite'],
+  // How hard Gemini 3.x thinks before answering: 'low' | 'medium' | 'high'.
+  // 'low' is the lowest-latency setting and is plenty for pulling dates out
+  // of an email; 'medium' is Google's default and waits longer for an answer.
+  // Thinking can't be switched off entirely on Gemini 3 Flash models.
+  // ('' omits the setting and lets the model use its default.)
+  GEMINI_THINKING_LEVEL: 'low',
 
   // Safety caps per trigger run, to stay far inside free quotas.
   MAX_THREADS_PER_RUN: 10,
@@ -103,10 +114,12 @@ var CONFIG = {
   // itself is never sent to Gemini. Receipts must land in THIS inbox.
   GS_RECEIPT_QUERY: 'from:gradescope.com newer_than:3d -label:mailbrah-processed',
 
-  // Brightspace (D2L) deadline sync. Paste your personal calendar-feed URL:
+  // Brightspace (D2L) deadline sync. Get your personal calendar-feed URL:
   // Brightspace > Calendar > Settings (gear) > Enable Calendar Feed >
-  // Subscribe > All Calendars and Tasks > copy URL. Leave '' to disable.
-  // A single cheap fetch of an official feed — hourly is fine.
+  // Subscribe > All Calendars and Tasks > copy URL — then store it as the
+  // Script Property BRIGHTSPACE_ICS_URL (or run setBrightspaceFeedUrl()).
+  // It contains a private token, so it does NOT belong in this file — this
+  // field is only a legacy fallback. A single cheap fetch — hourly is fine.
   BRIGHTSPACE_ICS_URL: '',
   BS_SCAN_EVERY_HOURS: 1,
 

@@ -37,7 +37,7 @@ Each extracted item receives one of three decisions:
 
 The behavior is controlled by `USER_PREFERENCES` in `Config.js`, so these categories can be changed without rewriting the rest of the project.
 
-MailBrah also checks your calendar before automatically adding a timed event. If the time conflicts with something already there, the event is moved to the pending queue and you decide what happens.
+MailBrah also checks every calendar you have visible in Google Calendar before automatically adding a timed event. If the time conflicts with something already there, the event is moved to the pending queue and you decide what happens.
 
 Deadlines do not become fake hour-long calendar blocks. They become Google Tasks in your default task list. Google Tasks stores the due date but not an exact due time, so MailBrah includes the stated time in the task title.
 
@@ -196,11 +196,12 @@ The most useful settings are:
 | `DAY_START_HOUR` | `9` | Earliest hour used when a reply does not include a time |
 | `DAY_END_HOUR` | `22` | End of the scheduling window |
 | `USER_PREFERENCES` | USC student defaults | Tells Gemini what to add, ask about, or ignore |
-| `BRIGHTSPACE_ICS_URL` | Empty | Enables Brightspace when a feed URL is supplied |
+| `LLM_CHAIN` | 3.8 Flash → 3.7 Flash → 3.5 Flash-Lite | Gemini models, tried in order |
+| `GEMINI_THINKING_LEVEL` | `low` | How long Gemini thinks before answering (`low` is fastest) |
 
 Keep `TIMEZONE` synchronized with the `timeZone` field in `appsscript.json`.
 
-The repository currently uses `gemini-3.7-flash`, with `gemini-3.5-flash` and `gemini-3.5-flash-lite` as fallbacks. Model availability and rate limits can change, so check the current [Gemini model list](https://ai.google.dev/gemini-api/docs/models) and your limits in [Google AI Studio](https://aistudio.google.com).
+MailBrah tries `gemini-3.8-flash` first, at the `low` thinking level. When it is overloaded or rate-limited, the call moves straight on to `gemini-3.7-flash`, then `gemini-3.5-flash-lite`, without waiting in between. Model availability and rate limits can change, so check the current [Gemini model list](https://ai.google.dev/gemini-api/docs/models) and your limits in [Google AI Studio](https://aistudio.google.com).
 
 ### 4. Authorize and start MailBrah
 
@@ -291,7 +292,7 @@ In Brightspace:
 4. Choose Subscribe.
 5. Select All Calendars and Tasks.
 6. Copy the generated URL.
-7. Paste it into `BRIGHTSPACE_ICS_URL` in `Config.js`.
+7. In Apps Script, open Project Settings > Script Properties and add it as `BRIGHTSPACE_ICS_URL`. (`setBrightspaceFeedUrl()` in `Setup.js` is another option.)
 
 Run:
 
@@ -309,7 +310,7 @@ MailBrah treats feed entries as follows:
 - Other timed entries go to the pending queue.
 - Entries ending in `- Available` are ignored.
 
-The feed URL contains a private token. Treat it like a password. Do not commit your personalized `Config.js` to a public repository. Regenerate the feed in Brightspace if the URL leaks.
+The feed URL contains a private token. Treat it like a password: keep it in Script Properties, never in `Config.js` or any other source file, so it can't end up in a commit. Regenerate the feed in Brightspace if the URL leaks.
 
 ## Privacy and cost
 
@@ -339,6 +340,10 @@ If the Google Cloud project associated with your Gemini key has no billing accou
 | `testGradescope()` | Lists upcoming Gradescope assignments without creating tasks |
 | `testGradescopeCompletion()` | Lists submitted Gradescope assignments and the tasks they would tick off, without changing anything |
 | `testBrightspace()` | Classifies Brightspace feed entries without creating anything |
+| `forceBrightspaceSync()` | Runs the real Brightspace sync now, ignoring the hourly limit |
+| `searchBrightspaceFeed(text)` | Prints raw feed entries that contain `text` |
+| `whyDuplicate()` | Explains why one item counts as a duplicate (edit the title and time inside it) |
+| `auditDecisions()` | Clears remembered decisions whose task or event no longer exists |
 | `testTaskCreation()` | Creates one real test task |
 | `seedTestCard()` | Creates sample pending items and sends a test notification |
 | `clearTestCard()` | Removes artifacts created by the card and task tests |

@@ -28,6 +28,22 @@ function setApiKey() {
 }
 
 /**
+ * Convenience setter for the Brightspace calendar-feed URL (Brightspace >
+ * Calendar > Settings > Enable Calendar Feed > Subscribe > copy URL).
+ * Paste URL -> run once -> put the placeholder back.
+ */
+function setBrightspaceFeedUrl() {
+  var url = 'PASTE_YOUR_BRIGHTSPACE_FEED_URL_HERE';
+  if (url.indexOf('PASTE_') === 0) {
+    throw new Error('Edit setBrightspaceFeedUrl() with your feed URL from Brightspace, ' +
+      'or add it as BRIGHTSPACE_ICS_URL under Project Settings > Script Properties.');
+  }
+  PropertiesService.getScriptProperties().setProperty('BRIGHTSPACE_ICS_URL', url.trim());
+  PropertiesService.getScriptProperties().deleteProperty(PROPS.BS_LAST); // scan on next run
+  Logger.log('Brightspace feed URL saved. Put the placeholder back, then run testBrightspace().');
+}
+
+/**
  * STEP 2 — run once. Verifies the API key with a live Gemini call, creates the
  * Gmail label, and installs the recurring trigger.
  */
@@ -138,22 +154,75 @@ function testGradescopeCompletion() {
 }
 
 /**
+ * REAL Brightspace sync, right now: ignores the hourly throttle and runs the
+ * actual pipeline (creates tasks/events, queues decisions) with a full
+ * per-entry log of what happened to every feed item.
+ */
+function forceBrightspaceSync() {
+  if (!brightspaceConfigured_()) {
+    throw new Error('No feed URL set — run setBrightspaceFeedUrl() first.');
+  }
+  PropertiesService.getScriptProperties().deleteProperty(PROPS.BS_LAST);
+  var stats = { emails: 0, added: [], updated: [], completed: [], pendingNew: [], dupes: 0, ignored: 0, skipped: 0, errors: 0 };
+  processBrightspace_(stats);
+  Logger.log('Done. New tasks/events appear on their DUE DATES (tasks in the all-day band / Google Tasks app). Queued decisions show on the MailBrah card and in the next digest.');
+}
+
+/**
  * Dry run for Brightspace: fetches your calendar feed and logs how each entry
  * would be handled (task / event / ask / skipped). Creates NO tasks — logs only.
- * Requires CONFIG.BRIGHTSPACE_ICS_URL to be set in Config.
+ * Requires the BRIGHTSPACE_ICS_URL Script Property (see setBrightspaceFeedUrl).
  */
 function testBrightspace() {
   if (!brightspaceConfigured_()) {
-    throw new Error('Set BRIGHTSPACE_ICS_URL in Config first (Brightspace > Calendar > Settings > Enable Calendar Feed > Subscribe).');
+    throw new Error('No feed URL set — run setBrightspaceFeedUrl(), or add BRIGHTSPACE_ICS_URL ' +
+      'under Project Settings > Script Properties (get the URL from Brightspace > Calendar > ' +
+      'Settings > Enable Calendar Feed > Subscribe).');
   }
   var events = bsFetchFeed_();
-  Logger.log('Feed has %s entries (TASK=deadline task, EVENT=auto calendar event, ASK=decision card, SKIP=ignored):', events.length);
+  var now = Date.now();
+  events.sort(function (a, b) { return a.start - b.start; });
+  var past = 0;
+  var lines = [];
   events.forEach(function (ev) {
     var cls = bsClassify_(ev);
-    var when = Utilities.formatDate(ev.start, CONFIG.TIMEZONE, 'EEE MMM d h:mm a');
-    Logger.log('  %s  "%s" (%s%s)', cls.type.toUpperCase(), cls.title || ev.summary, when,
-      ev.allDay ? ', all-day' : '');
+    // Same "effective time" the real sync uses: all-day items count until
+    // 11:59 PM of their day, so today's all-day quiz is NOT past.
+    var effective = ev.allDay
+      ? new Date(ev.start.getFullYear(), ev.start.getMonth(), ev.start.getDate(), 23, 59, 0).getTime()
+      : ev.start.getTime();
+    if (effective < now) { past++; return; }
+    lines.push('  ' + cls.type.toUpperCase() + '  "' + (cls.title || ev.summary) + '" (' +
+      Utilities.formatDate(ev.start, CONFIG.TIMEZONE, 'EEE MMM d yyyy h:mm a') +
+      (ev.allDay ? ', all-day' : '') + ')');
   });
+  Logger.log('Feed has %s entries; %s are in the past (stale course-copy leftovers etc.) and are ignored by the sync. The %s UPCOMING entries (TASK=deadline task, EVENT=auto calendar event, ASK=decision card, SKIP=ignored):\n%s',
+    events.length, past, lines.length, lines.join('\n'));
+}
+
+/**
+ * Debug: search the RAW Brightspace feed for a text fragment and print every
+ * matching VEVENT's SUMMARY and DTSTART lines — settles "is it even in the
+ * feed?" questions. Example: searchBrightspaceFeed('AA1')
+ */
+function searchBrightspaceFeed(query) {
+  query = String(query || 'AA1').toLowerCase();
+  var raw = UrlFetchApp.fetch(bsFeedUrl_(), { muteHttpExceptions: true }).getContentText();
+  var unfolded = raw.replace(/\r?\n[ \t]/g, '');
+  var blocks = unfolded.split('BEGIN:VEVENT').slice(1);
+  var hits = 0;
+  blocks.forEach(function (chunk) {
+    chunk = chunk.split('END:VEVENT')[0];
+    if (chunk.toLowerCase().indexOf(query) === -1) return;
+    hits++;
+    var lines = chunk.split(/\r?\n/).filter(function (l) {
+      return /^(SUMMARY|DTSTART|DTEND|CATEGORIES|LOCATION)/.test(l);
+    });
+    Logger.log('MATCH %s:\n  %s', hits, lines.join('\n  '));
+  });
+  Logger.log(hits
+    ? hits + ' matching VEVENT(s) — if a match shows here but not in testBrightspace, the parser is dropping it (send me the MATCH block).'
+    : 'NO VEVENT contains "' + query + '" — the item is not in the feed at all. D2L\'s "Upcoming events" widget also shows assignment due dates that were never put on the course CALENDAR; the ICS feed only carries actual calendar entries.');
 }
 
 /**
@@ -189,10 +258,14 @@ function runDiagnostics() {
     report.push(status + '  ' + label + (detail ? ' — ' + detail : ''));
   };
 
+  var configured = CONFIG.LLM_CHAIN.filter(function (e) {
+    var spec = LLM_PROVIDERS[e.provider];
+    return spec && props.getProperty(spec.keyProp);
+  }).map(function (e) { return e.provider + '/' + e.model; });
   try {
-    var probe = callGemini_('Return JSON with an empty events array.', GEMINI_EVENTS_SCHEMA);
-    add(probe ? 'PASS' : 'FAIL', 'Gemini API', 'model ' + CONFIG.GEMINI_MODEL);
-  } catch (err) { add('FAIL', 'Gemini API', String(err).slice(0, 140)); }
+    var probe = callLLM_('Return JSON with an empty events array.', GEMINI_EVENTS_SCHEMA);
+    add(probe ? 'PASS' : 'FAIL', 'LLM chain', configured.join(' → ') || 'NO KEYS CONFIGURED');
+  } catch (err) { add('FAIL', 'LLM chain', String(err).slice(0, 140)); }
 
   try {
     add(GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL) ? 'PASS' : 'FAIL',
@@ -351,6 +424,103 @@ function clearTestCard() {
   });
   Logger.log('Cleared %s test entr%s (pending cards, decisions, and created items).',
     cleared, cleared === 1 ? 'y' : 'ies');
+}
+
+/**
+ * Explains EXACTLY why one item is (or isn't) considered a duplicate:
+ * checks all three layers verbosely — exact fingerprint, fuzzy decided-store
+ * match, and live calendar overlap. Edit TITLE/START below for other items.
+ */
+function whyDuplicate() {
+  var TITLE = 'WRIT-150 — AA1';
+  var START = new Date(2026, 8, 2, 13, 0, 0); // Sep 2, 1:00 PM
+  var END = new Date(START.getTime() + 60 * 60 * 1000);
+
+  var fp = eventFingerprint_(TITLE, START);
+  var decided = getDecided_();
+  Logger.log('Checking "%s" @ %s — fingerprint %s', TITLE,
+    Utilities.formatDate(START, CONFIG.TIMEZONE, 'EEE MMM d yyyy h:mm a'), fp);
+
+  // Layer 1: exact fingerprint
+  if (decided[fp]) {
+    var e = decided[fp];
+    Logger.log('LAYER 1 HIT — exact decision exists: decision=%s, storedTitle="%s", start=%s, artifact=%s',
+      e.d, e.t, new Date(e.s).toISOString(), e.a || '(none recorded)');
+  } else {
+    Logger.log('Layer 1 (exact fingerprint): no match.');
+  }
+
+  // Layer 2: fuzzy decided-store match
+  var fuzzyHits = 0;
+  Object.keys(decided).forEach(function (k) {
+    var d = decided[k];
+    if (!d.t) return;
+    var deltaMin = Math.abs(d.s - START.getTime()) / 60000;
+    var sim = titleSimilarity_(TITLE, d.t);
+    if (deltaMin <= 30 && sim >= 0.6) {
+      fuzzyHits++;
+      Logger.log('LAYER 2 HIT — fuzzy match: storedTitle="%s", decision=%s, start=%s (Δ %s min), similarity=%s, artifact=%s',
+        d.t, d.d, new Date(d.s).toISOString(), Math.round(deltaMin), sim.toFixed(2), d.a || '(none)');
+    }
+  });
+  if (!fuzzyHits) Logger.log('Layer 2 (fuzzy decided match): no match among %s decisions.', Object.keys(decided).length);
+
+  // Layer 3: live calendar overlap
+  var overlaps = getCalendar_().getEvents(
+    new Date(START.getTime() - 60000), new Date(END.getTime() + 60000));
+  if (!overlaps.length) Logger.log('Layer 3 (calendar overlap): no events in the window.');
+  overlaps.forEach(function (ev) {
+    var sim = titleSimilarity_(TITLE, ev.getTitle());
+    Logger.log('%s — calendar event in window: "%s" (%s–%s), similarity=%s',
+      sim >= 0.6 ? 'LAYER 3 HIT' : 'Layer 3 candidate (below threshold)',
+      ev.getTitle(),
+      Utilities.formatDate(ev.getStartTime(), CONFIG.TIMEZONE, 'h:mm a'),
+      Utilities.formatDate(ev.getEndTime(), CONFIG.TIMEZONE, 'h:mm a'),
+      sim.toFixed(2));
+  });
+
+  Logger.log('Verdict: isDuplicate_ returns %s.', isDuplicate_(TITLE, START, END));
+}
+
+/**
+ * Reality check for the decision store: verifies every "added" decision
+ * against the actual task/calendar item it claims to have created, and
+ * clears the ones whose item no longer exists (so the next sync re-adds
+ * them). Declines are left untouched; completed (checked-off) tasks still
+ * exist and stay verified. Note: tasks you deliberately deleted will come
+ * back on the next sync after this — that's the point of running it.
+ */
+function auditDecisions() {
+  var props = PropertiesService.getScriptProperties();
+  var decided = getDecided_();
+  var checked = 0, phantoms = 0, intact = 0, unverifiable = 0, declines = 0;
+  Object.keys(decided).forEach(function (fp) {
+    var e = decided[fp];
+    if (e.d !== 'added') { declines++; return; }
+    if (!e.a) { unverifiable++; return; } // pre-tracking entry — left alone
+    checked++;
+    var exists = false;
+    try {
+      if (e.a.indexOf('t:') === 0) {
+        var task = Tasks.Tasks.get('@default', e.a.slice(2));
+        exists = !!(task && !task.deleted);
+      } else if (e.a.indexOf('c:') === 0) {
+        exists = !!getCalendar_().getEventById(e.a.slice(2));
+      }
+    } catch (err) {
+      exists = false;
+    }
+    if (exists) {
+      intact++;
+    } else {
+      phantoms++;
+      Logger.log('Phantom decision (its item no longer exists) — cleared: "%s"', e.t || fp);
+      props.deleteProperty(DECIDED_PREFIX + fp);
+    }
+  });
+  Logger.log('Audit: %s checked — %s intact, %s PHANTOMS CLEARED, %s unverifiable (left alone), %s declines untouched.%s',
+    checked, intact, phantoms, unverifiable, declines,
+    phantoms ? ' Run forceBrightspaceSync() to re-create what was cleared.' : ' Store matches reality — nothing to fix.');
 }
 
 /**

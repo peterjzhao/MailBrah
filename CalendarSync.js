@@ -88,10 +88,40 @@ function isDuplicate_(title, start, end) {
 }
 
 /**
+ * Calendars considered for CONFLICTS: every calendar visible (ticked) in
+ * your calendar list — classes often live on a secondary calendar, and
+ * checking only the primary made MailBrah blind to them.
+ */
+function getConflictCalendars_() {
+  try {
+    var selected = CalendarApp.getAllCalendars().filter(function (c) {
+      return c.isSelected();
+    });
+    if (selected.length) return selected;
+  } catch (err) {
+    Logger.log('Could not enumerate calendars (%s) — conflicts limited to the primary.', err);
+  }
+  return [getCalendar_()];
+}
+
+/** Timed (non-all-day) events in the window across ALL visible calendars. */
+function busyEventsInWindow_(start, end) {
+  var events = [];
+  getConflictCalendars_().forEach(function (cal) {
+    try {
+      cal.getEvents(start, end).forEach(function (ev) {
+        if (!ev.isAllDayEvent()) events.push(ev);
+      });
+    } catch (err) { /* unreadable calendar — skip */ }
+  });
+  return events;
+}
+
+/**
  * Earliest free gap of the given length on the given day, inside the waking
- * window (DAY_START_HOUR–DAY_END_HOUR) and never in the past. Checks the
- * calendar once and scans in 30-min steps. Falls back to the window start if
- * the day is fully booked (the caller surfaces the conflict).
+ * window (DAY_START_HOUR–DAY_END_HOUR) and never in the past. Checks all
+ * visible calendars once and scans in 30-min steps. Falls back to the window
+ * start if the day is fully booked (the caller surfaces the conflict).
  */
 function findEarliestFreeSlot_(onDate, durationMs) {
   var dayStart = new Date(onDate.getFullYear(), onDate.getMonth(), onDate.getDate(), CONFIG.DAY_START_HOUR, 0, 0);
@@ -100,8 +130,7 @@ function findEarliestFreeSlot_(onDate, durationMs) {
   t.setSeconds(0, 0);
   t.setMinutes(t.getMinutes() + ((30 - t.getMinutes() % 30) % 30)); // round up to :00/:30
 
-  var busy = getCalendar_().getEvents(dayStart, dayEnd)
-    .filter(function (ev) { return !ev.isAllDayEvent(); });
+  var busy = busyEventsInWindow_(dayStart, dayEnd);
 
   while (t.getTime() + durationMs <= dayEnd.getTime()) {
     var end = new Date(t.getTime() + durationMs);
@@ -114,10 +143,9 @@ function findEarliestFreeSlot_(onDate, durationMs) {
   return dayStart;
 }
 
-/** Existing non-all-day events overlapping [start, end): [{title, label}] */
+/** Events overlapping [start, end) across ALL visible calendars: [{title, label}] */
 function findConflicts_(start, end) {
-  return getCalendar_().getEvents(start, end)
-    .filter(function (ev) { return !ev.isAllDayEvent(); })
+  return busyEventsInWindow_(start, end)
     .filter(function (ev) { return ev.getStartTime() < end && ev.getEndTime() > start; })
     .map(function (ev) {
       return {

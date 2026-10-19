@@ -1,0 +1,4 @@
+# clasp push uploads only the Apps Script sources; everything else stays local.
+**/**
+!appsscript.json
+!*.js
