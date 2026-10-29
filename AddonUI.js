@@ -94,7 +94,7 @@ function handleDecline(e) {
 }
 
 /**
- * Shared Accept/Decline core used by the Gmail card and reply commands.
+ * Shared Accept/Decline core behind the card's buttons.
  * takePending_ claims the entry first, so a double-tap can't act twice;
  * on failure the entry is restored so the decision isn't swallowed.
  * @return {Object} {ok: boolean, message: string}

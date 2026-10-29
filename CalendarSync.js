@@ -33,16 +33,6 @@ function eventFingerprint_(title, startDate) {
   return digest.map(function (b) { return ((b + 256) % 256).toString(16).padStart(2, '0'); }).join('');
 }
 
-/** Parse "YYYY-MM-DDTHH:mm[:ss]" as local wall time in the script timezone. */
-function parseLocalIso_(isoLocal) {
-  var m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(String(isoLocal || ''));
-  if (!m) return null;
-  // With the manifest timeZone set, the V8 runtime's local zone matches
-  // CONFIG.TIMEZONE, so this Date constructor yields the intended instant.
-  var d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), Number(m[4]), Number(m[5]), 0, 0);
-  return isNaN(d.getTime()) ? null : d;
-}
-
 /** Token-overlap similarity in [0,1] for fuzzy title matching. */
 function titleSimilarity_(a, b) {
   var tokensOf = function (s) {
@@ -118,32 +108,6 @@ function busyEventsInWindow_(start, end) {
     } catch (err) { /* unreadable calendar — skip */ }
   });
   return events;
-}
-
-/**
- * Earliest free gap of the given length on the given day, inside the waking
- * window (DAY_START_HOUR–DAY_END_HOUR) and never in the past. Checks all
- * visible calendars once and scans in 30-min steps. Falls back to the window
- * start if the day is fully booked (the caller surfaces the conflict).
- */
-function findEarliestFreeSlot_(onDate, durationMs) {
-  var dayStart = new Date(onDate.getFullYear(), onDate.getMonth(), onDate.getDate(), CONFIG.DAY_START_HOUR, 0, 0);
-  var dayEnd = new Date(onDate.getFullYear(), onDate.getMonth(), onDate.getDate(), CONFIG.DAY_END_HOUR, 0, 0);
-  var t = new Date(Math.max(dayStart.getTime(), Date.now() + 15 * 60 * 1000));
-  t.setSeconds(0, 0);
-  t.setMinutes(t.getMinutes() + ((30 - t.getMinutes() % 30) % 30)); // round up to :00/:30
-
-  var busy = busyEventsInWindow_(dayStart, dayEnd);
-
-  while (t.getTime() + durationMs <= dayEnd.getTime()) {
-    var end = new Date(t.getTime() + durationMs);
-    var clash = busy.some(function (ev) {
-      return ev.getStartTime() < end && ev.getEndTime() > t;
-    });
-    if (!clash) return t;
-    t = new Date(t.getTime() + 30 * 60 * 1000);
-  }
-  return dayStart;
 }
 
 /** Events overlapping [start, end) across ALL visible calendars: [{title, label}] */

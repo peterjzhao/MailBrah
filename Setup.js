@@ -5,27 +5,12 @@
  * SECRETS never belong in this file (it may end up in a git repo). Apps
  * Script's equivalent of an env file is SCRIPT PROPERTIES — set them in the
  * editor UI: Project Settings (gear icon) > Script Properties > Add:
- *   GEMINI_API_KEY  = your key from https://aistudio.google.com/apikey
  *   GS_EMAIL        = your Gradescope email        (optional)
  *   GS_PASSWORD     = your Gradescope password     (optional)
  * The setter functions below are just a convenience wrapper around the same
  * store: if you use them, paste the value, run once, and IMMEDIATELY revert
  * the placeholder before saving/committing.
  */
-
-/**
- * Convenience alternative to the Script Properties UI for the Gemini key.
- * Paste key -> run once -> put the placeholder back. Prefer the UI.
- */
-function setApiKey() {
-  var key = 'PASTE_YOUR_GEMINI_API_KEY_HERE';
-  if (key.indexOf('PASTE_') === 0) {
-    throw new Error('Either edit setApiKey() with your key from aistudio.google.com/apikey, ' +
-      'or (better) add it as GEMINI_API_KEY under Project Settings > Script Properties.');
-  }
-  PropertiesService.getScriptProperties().setProperty(PROPS.API_KEY, key.trim());
-  Logger.log('API key saved to Script Properties. Now put the placeholder back in this file.');
-}
 
 /**
  * Convenience setter for the Brightspace calendar-feed URL (Brightspace >
@@ -44,21 +29,15 @@ function setBrightspaceFeedUrl() {
 }
 
 /**
- * STEP 2 — run once. Verifies the API key with a live Gemini call, creates the
- * Gmail label, and installs the recurring trigger.
+ * Run once. Creates the Gmail label and installs the recurring triggers.
  */
 function setup() {
-  // 1. Verify the Gemini key actually works before anything else.
-  var probe = interpretReplyWithGemini_('also add coffee chat tomorrow at 3pm', []);
-  Logger.log('Gemini OK — test reply returned %s new event(s).',
-    probe ? probe.newEvents.length : 0);
-
-  // 2. Gmail label used to mark Gradescope receipts once read.
+  // 1. Gmail label used to mark Gradescope receipts once read.
   if (!GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL)) {
     GmailApp.createLabel(CONFIG.PROCESSED_LABEL);
   }
 
-  // 3. Recurring triggers (replaces any existing MailBrah triggers):
+  // 2. Recurring triggers (replaces any existing MailBrah triggers):
   //    the scan every few minutes, and the daily morning digest.
   ScriptApp.getProjectTriggers().forEach(function (t) {
     var fn = t.getHandlerFunction();
@@ -159,7 +138,7 @@ function forceBrightspaceSync() {
     throw new Error('No feed URL set — run setBrightspaceFeedUrl() first.');
   }
   PropertiesService.getScriptProperties().deleteProperty(PROPS.BS_LAST);
-  var stats = { added: [], updated: [], completed: [], pendingNew: [], errors: 0 };
+  var stats = { added: [], updated: [], completed: [], pendingNew: [] };
   processBrightspace_(stats);
   Logger.log('Done. New tasks/events appear on their DUE DATES (tasks in the all-day band / Google Tasks app). Queued decisions show on the MailBrah card and in the next digest.');
 }
@@ -267,16 +246,6 @@ function runDiagnostics() {
   var add = function (status, label, detail) {
     report.push(status + '  ' + label + (detail ? ' — ' + detail : ''));
   };
-
-  var configured = CONFIG.LLM_CHAIN.filter(function (e) {
-    var spec = LLM_PROVIDERS[e.provider];
-    return spec && props.getProperty(spec.keyProp);
-  }).map(function (e) { return e.provider + '/' + e.model; });
-  try {
-    var probe = callLLM_('Return JSON with empty decisions and newEvents arrays, ' +
-      'wantsPendingList false, and note "ok".', GEMINI_REPLY_SCHEMA);
-    add(probe ? 'PASS' : 'FAIL', 'LLM chain', configured.join(' → ') || 'NO KEYS CONFIGURED');
-  } catch (err) { add('FAIL', 'LLM chain', String(err).slice(0, 140)); }
 
   try {
     add(GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL) ? 'PASS' : 'FAIL',
@@ -542,9 +511,9 @@ function auditDecisions() {
  */
 function resetAllState() {
   var props = PropertiesService.getScriptProperties();
-  var keep = [PROPS.API_KEY, PROPS.GS_EMAIL, PROPS.GS_PASSWORD, 'BRIGHTSPACE_ICS_URL'];
+  var keep = [PROPS.GS_EMAIL, PROPS.GS_PASSWORD, 'BRIGHTSPACE_ICS_URL'];
   Object.keys(props.getProperties()).forEach(function (key) {
     if (keep.indexOf(key) === -1) props.deleteProperty(key);
   });
-  Logger.log('MailBrah state cleared (API key, Gradescope credentials and Brightspace feed URL kept).');
+  Logger.log('MailBrah state cleared (Gradescope credentials and Brightspace feed URL kept).');
 }

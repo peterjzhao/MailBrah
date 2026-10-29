@@ -5,8 +5,8 @@
  *
  * This is one reconcile pass rather than a hook in every place items get
  * created: each sync reads what is actually upcoming — open Google Tasks
- * plus events on CONFIG.CALENDAR_ID, whatever added them (email,
- * Brightspace, Gradescope, a reply, or you by hand) — works out which bars
+ * plus events on CONFIG.CALENDAR_ID, whatever added them (Brightspace,
+ * Gradescope, or you by hand) — works out which bars
  * should exist, then creates, moves or deletes bars to match.
  *
  * Each bar carries a private tag naming its item, so bars are found again

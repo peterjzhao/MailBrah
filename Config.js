@@ -1,9 +1,5 @@
 /**
  * MailBrah configuration. Everything user-tunable lives here.
- *
- * The Gemini API key is NOT stored here — set it once via Script Properties:
- *   Project Settings (gear icon) > Script Properties > add GEMINI_API_KEY
- * or run setApiKey() in Setup.js.
  */
 var CONFIG = {
   // Label applied to Gradescope receipt threads once read (also referenced
@@ -14,46 +10,19 @@ var CONFIG = {
   // 'xxxx@group.calendar.google.com'.
   CALENDAR_ID: 'primary',
 
-  // Used for parsing LLM-returned local times and formatting card text.
+  // Used for due times and for formatting card and email text.
   // Keep in sync with "timeZone" in appsscript.json.
   TIMEZONE: 'America/Los_Angeles',
-
-  // Gemini models, tried top to bottom on every call: the newest Flash first,
-  // older ones only when it is overloaded (HTTP 503) or rate-limited (429) —
-  // and it moves on immediately instead of sleeping, so a busy model never
-  // stalls a run. Free tier, no billing needed (as of Sep 2026):
-  // gemini-3.8-flash (GA Sep 2, 2026), gemini-3.7-flash, gemini-3.5-flash-lite.
-  // Check your limits at https://aistudio.google.com/rate-limit
-  // The key lives in Script Properties as GEMINI_API_KEY (see Setup.js).
-  LLM_CHAIN: [
-    { provider: 'gemini', model: 'gemini-3.8-flash' },
-    { provider: 'gemini', model: 'gemini-3.7-flash' },
-    { provider: 'gemini', model: 'gemini-3.5-flash-lite' }
-  ],
-
-  // How hard Gemini 3.x thinks before answering: 'low' | 'medium' | 'high'.
-  // 'low' is the lowest-latency setting and is plenty for reading a reply
-  // command; 'medium' is Google's default and waits longer for an answer.
-  // Thinking can't be switched off entirely on Gemini 3 Flash models.
-  // ('' omits the setting and lets the model use its default.)
-  GEMINI_THINKING_LEVEL: 'low',
 
   // Brightspace and Gradescope items further out than this are skipped as
   // likely stale or wrong-year entries.
   MAX_EVENT_HORIZON_DAYS: 370,
 
-  // Your waking window. When a reply command gives no clock time ("get
-  // altoids tomorrow"), the event is slotted into the EARLIEST free gap on
-  // your calendar inside this window — never before you're up.
-  DAY_START_HOUR: 9,
-  DAY_END_HOUR: 22,
-
   // Master switch for notification emails. When true you get:
   //  - ONE morning digest (below) every day, listing everything awaiting a
   //    decision (or confirming nothing is), and
   //  - an immediate email only when a newly found item happens TODAY.
-  // REPLYING to either in plain words ("add the career fair, decline the
-  // rest") is a command — Gemini interprets it and acts on the next scan.
+  // Open either one and tap the MailBrah icon to add or decline.
   SEND_DECISION_NOTIFICATIONS: true,
 
   // When the daily digest goes out (script timezone). nearMinute means
@@ -61,18 +30,16 @@ var CONFIG = {
   DIGEST_HOUR: 8,
   DIGEST_MINUTE: 30,
 
-  // Max reply-command messages interpreted per scan (1 Gemini call each).
-  MAX_REPLY_COMMANDS_PER_RUN: 5,
-
   // An undecided item is dropped after this long in the queue (and always
   // once its event has passed) — keeps the card and emails concise. If a
   // later sync finds the same item again, it gets asked anew.
   PENDING_MAX_AGE_HOURS: 48,
 
   // Trigger frequency in minutes (used by setup()). Valid: 1, 5, 10, 15, 30.
-  // 5 is the sweet spot: near-realtime replies/receipts at ~20% of the free
-  // tier's 90-min/day trigger-runtime quota. Every-1-minute would spend most
-  // of that quota on idle runs and risk dead runs late in the day.
+  // 5 is the sweet spot: submissions get ticked off within minutes of the
+  // receipt, at a fraction of the free tier's 90-min/day trigger-runtime
+  // quota. Every-1-minute would spend most of that quota on idle runs and
+  // risk dead runs late in the day.
   TRIGGER_EVERY_MINUTES: 5,
 
   // Gradescope deadline sync (active once setGradescopeCredentials() is run).
@@ -84,8 +51,8 @@ var CONFIG = {
 
   // Gradescope emails a receipt after each submission (from
   // no-reply@gradescope.com). MailBrah uses one as a trigger to re-check
-  // that course immediately and tick off the matching task; the email text
-  // itself is never sent to Gemini. Receipts must land in THIS inbox.
+  // that course immediately and tick off the matching task. Receipts must
+  // land in THIS inbox.
   GS_RECEIPT_QUERY: 'from:gradescope.com newer_than:3d -label:mailbrah-processed',
 
   // Brightspace (D2L) deadline sync. Get your personal calendar-feed URL:
@@ -129,8 +96,7 @@ var CONFIG = {
  * 'MB_D_<fingerprint>' (added/declined decisions, CalendarSync.js).
  */
 var PROPS = {
-  API_KEY: 'GEMINI_API_KEY',
-  SEEN_MESSAGES: 'MB_SEEN_MSGS',   // JSON array of handled Gmail message IDs (replies, receipts)
+  SEEN_MESSAGES: 'MB_SEEN_MSGS',   // JSON array of handled Gradescope receipt message IDs
   LAST_RUN: 'MB_LAST_RUN',         // epoch ms of last successful scan
   GS_EMAIL: 'GS_EMAIL',            // Gradescope login (set via setGradescopeCredentials)
   GS_PASSWORD: 'GS_PASSWORD',

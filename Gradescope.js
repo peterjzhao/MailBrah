@@ -238,7 +238,6 @@ function gsCookieHeader_(map) {
  *
  * Receipts are marked seen and labelled before the re-check, so a Gradescope
  * outage costs at most the instant tick — the regular scan still catches it.
- * These messages never reach Gemini.
  */
 function processGradescopeReceipts_(stats) {
   var threads = GmailApp.search(CONFIG.GS_RECEIPT_QUERY, 0, 10);

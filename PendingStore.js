@@ -15,7 +15,7 @@ var PENDING_MAX = 40;
 
 /**
  * Pending events sorted by start time. Every read prunes first — so the
- * card, the emails, and reply commands always see a fresh, concise list:
+ * card and the emails always see a fresh, concise list:
  * entries whose event has passed are dropped, and entries older than
  * PENDING_MAX_AGE_HOURS expire undecided (a later sync can raise them
  * again).
