@@ -49,15 +49,11 @@ function setBrightspaceFeedUrl() {
  */
 function setup() {
   // 1. Verify the Gemini key actually works before anything else.
-  var probe = extractEventsWithGemini({
-    subject: 'Test: Coffee chat',
-    from: 'test@usc.edu',
-    receivedIso: Utilities.formatDate(new Date(), CONFIG.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ss"),
-    body: 'Join us for a coffee chat tomorrow at 3pm in the Student Union.'
-  });
-  Logger.log('Gemini OK — test extraction returned %s event(s).', probe.length);
+  var probe = interpretReplyWithGemini_('also add coffee chat tomorrow at 3pm', []);
+  Logger.log('Gemini OK — test reply returned %s new event(s).',
+    probe ? probe.newEvents.length : 0);
 
-  // 2. Gmail label used to mark processed threads.
+  // 2. Gmail label used to mark Gradescope receipts once read.
   if (!GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL)) {
     GmailApp.createLabel(CONFIG.PROCESSED_LABEL);
   }
@@ -163,7 +159,7 @@ function forceBrightspaceSync() {
     throw new Error('No feed URL set — run setBrightspaceFeedUrl() first.');
   }
   PropertiesService.getScriptProperties().deleteProperty(PROPS.BS_LAST);
-  var stats = { emails: 0, added: [], updated: [], completed: [], pendingNew: [], dupes: 0, ignored: 0, skipped: 0, errors: 0 };
+  var stats = { added: [], updated: [], completed: [], pendingNew: [], errors: 0 };
   processBrightspace_(stats);
   Logger.log('Done. New tasks/events appear on their DUE DATES (tasks in the all-day band / Google Tasks app). Queued decisions show on the MailBrah card and in the next digest.');
 }
@@ -226,25 +222,39 @@ function searchBrightspaceFeed(query) {
 }
 
 /**
- * Dry run: extract events from your most recent USC email and log the raw
- * LLM output. Touches nothing — no calendar writes, no labels, no state.
+ * Dry run for heads-up bars: logs which bars would be added, updated or
+ * removed right now. Changes nothing.
  */
-function dryRunLatest() {
-  var threads = GmailApp.search('from:usc.edu', 0, 1);
-  if (!threads.length) {
-    Logger.log('No usc.edu email found. Adjust the search in dryRunLatest() to test.');
-    return;
-  }
-  var msgs = threads[0].getMessages();
-  var msg = msgs[msgs.length - 1];
-  Logger.log('Testing on: "%s" from %s', msg.getSubject(), msg.getFrom());
-  var events = extractEventsWithGemini({
-    subject: msg.getSubject(),
-    from: msg.getFrom(),
-    receivedIso: Utilities.formatDate(msg.getDate(), CONFIG.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ss"),
-    body: msg.getPlainBody()
+function testLeadUpBars() {
+  syncLeadUpBars_({ dryRun: true });
+}
+
+/** Sync heads-up bars right now, ignoring the hourly limit. */
+function syncLeadUpBarsNow() {
+  syncLeadUpBars_();
+}
+
+/**
+ * Deletes every heads-up bar MailBrah made (past ones too) and forgets
+ * which ones you'd deleted by hand. To stop bars for good, set
+ * LEADUP_ENABLED to false in Config first — otherwise the next scan adds
+ * them back.
+ */
+function removeLeadUpBars() {
+  var today = stripTime_(new Date());
+  var from = new Date(today.getFullYear(), today.getMonth(), today.getDate() - 120);
+  var to = new Date(today.getFullYear(), today.getMonth(),
+    today.getDate() + CONFIG.MAX_EVENT_HORIZON_DAYS + CONFIG.LEADUP_DAYS + 1);
+  var removed = 0;
+  getCalendar_().getEvents(from, to).forEach(function (ev) {
+    if (!leadUpSourceOf_(ev)) return;
+    ev.deleteEvent();
+    removed++;
   });
-  Logger.log(JSON.stringify(events, null, 2));
+  PropertiesService.getScriptProperties().deleteProperty(PROPS.LEADUP_MADE);
+  Logger.log('Removed %s heads-up bar(s).%s', removed, CONFIG.LEADUP_ENABLED
+    ? ' LEADUP_ENABLED is still true, so the next scan will add them back.'
+    : '');
 }
 
 /**
@@ -263,15 +273,14 @@ function runDiagnostics() {
     return spec && props.getProperty(spec.keyProp);
   }).map(function (e) { return e.provider + '/' + e.model; });
   try {
-    var probe = callLLM_('Return JSON with an empty events array.', GEMINI_EVENTS_SCHEMA);
+    var probe = callLLM_('Return JSON with empty decisions and newEvents arrays, ' +
+      'wantsPendingList false, and note "ok".', GEMINI_REPLY_SCHEMA);
     add(probe ? 'PASS' : 'FAIL', 'LLM chain', configured.join(' → ') || 'NO KEYS CONFIGURED');
   } catch (err) { add('FAIL', 'LLM chain', String(err).slice(0, 140)); }
 
   try {
     add(GmailApp.getUserLabelByName(CONFIG.PROCESSED_LABEL) ? 'PASS' : 'FAIL',
       'Gmail label "' + CONFIG.PROCESSED_LABEL + '"');
-    var waiting = GmailApp.search(CONFIG.SEARCH_QUERY, 0, 1);
-    add('PASS', 'Gmail search', waiting.length ? 'unprocessed USC mail is waiting' : 'no unprocessed USC mail right now');
   } catch (err) { add('FAIL', 'Gmail access', String(err).slice(0, 140)); }
 
   try {
@@ -293,6 +302,9 @@ function runDiagnostics() {
 
   add('INFO', 'Gradescope', gradescopeConfigured_() ? 'configured' : 'not configured (optional)');
   add('INFO', 'Brightspace', brightspaceConfigured_() ? 'configured' : 'not configured (optional)');
+  add('INFO', 'Heads-up bars', CONFIG.LEADUP_ENABLED
+    ? 'on — starting ' + CONFIG.LEADUP_DAYS + ' days before exams and big assignments'
+    : 'off');
 
   var lastRun = props.getProperty(PROPS.LAST_RUN);
   add(lastRun ? 'PASS' : 'FAIL', 'Last scan', lastRun
@@ -470,6 +482,7 @@ function whyDuplicate() {
     new Date(START.getTime() - 60000), new Date(END.getTime() + 60000));
   if (!overlaps.length) Logger.log('Layer 3 (calendar overlap): no events in the window.');
   overlaps.forEach(function (ev) {
+    if (leadUpSourceOf_(ev)) return; // heads-up bars never count (see isDuplicate_)
     var sim = titleSimilarity_(TITLE, ev.getTitle());
     Logger.log('%s — calendar event in window: "%s" (%s–%s), similarity=%s',
       sim >= 0.6 ? 'LAYER 3 HIT' : 'Layer 3 candidate (below threshold)',
@@ -524,16 +537,14 @@ function auditDecisions() {
 }
 
 /**
- * DANGER: wipes MailBrah's memory (seen messages, decisions, pending queue,
- * failure counters). Calendar events and Gmail labels are left alone.
- * Already-labeled threads stay skipped; remove the label in Gmail to
- * reprocess a thread.
+ * DANGER: wipes MailBrah's memory (seen messages, decisions, pending queue).
+ * Calendar events and Gmail labels are left alone.
  */
 function resetAllState() {
   var props = PropertiesService.getScriptProperties();
-  var keep = [PROPS.API_KEY, PROPS.GS_EMAIL, PROPS.GS_PASSWORD];
+  var keep = [PROPS.API_KEY, PROPS.GS_EMAIL, PROPS.GS_PASSWORD, 'BRIGHTSPACE_ICS_URL'];
   Object.keys(props.getProperties()).forEach(function (key) {
     if (keep.indexOf(key) === -1) props.deleteProperty(key);
   });
-  Logger.log('MailBrah state cleared (API key and Gradescope credentials kept).');
+  Logger.log('MailBrah state cleared (API key, Gradescope credentials and Brightspace feed URL kept).');
 }

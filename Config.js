@@ -6,12 +6,8 @@
  * or run setApiKey() in Setup.js.
  */
 var CONFIG = {
-  // Gmail search for candidate emails. `from:usc.edu` also matches subdomains
-  // like @email.usc.edu and @announce.usc.edu. `-subject:mailbrah` keeps
-  // MailBrah's own notification emails out of the pipeline.
-  SEARCH_QUERY: 'from:usc.edu -subject:mailbrah newer_than:3d -label:mailbrah-processed',
-
-  // Label applied to threads after processing (also referenced in SEARCH_QUERY).
+  // Label applied to Gradescope receipt threads once read (also referenced
+  // in GS_RECEIPT_QUERY).
   PROCESSED_LABEL: 'mailbrah-processed',
 
   // 'primary' uses your default calendar; otherwise a calendar ID like
@@ -36,36 +32,14 @@ var CONFIG = {
   ],
 
   // How hard Gemini 3.x thinks before answering: 'low' | 'medium' | 'high'.
-  // 'low' is the lowest-latency setting and is plenty for pulling dates out
-  // of an email; 'medium' is Google's default and waits longer for an answer.
+  // 'low' is the lowest-latency setting and is plenty for reading a reply
+  // command; 'medium' is Google's default and waits longer for an answer.
   // Thinking can't be switched off entirely on Gemini 3 Flash models.
   // ('' omits the setting and lets the model use its default.)
   GEMINI_THINKING_LEVEL: 'low',
 
-  // Safety caps per trigger run, to stay far inside free quotas.
-  MAX_THREADS_PER_RUN: 10,
-  MAX_LLM_CALLS_PER_RUN: 12,
-
-  // Cheap pre-filter: an email is only sent to Gemini if subject+body match
-  // at least one of these patterns (case-insensitive regex). Anything with no
-  // time/date/event signal at all is skipped for free. False positives are
-  // harmless (one AI call); keep patterns generous to avoid missing events.
-  PREFILTER_ENABLED: true,
-  PREFILTER_PATTERNS: [
-    '\\d\\s*(a\\.?m\\.?|p\\.?m\\.?)\\b',                  // 3pm, 10 a.m.
-    '\\b\\d{1,2}:\\d{2}\\b',                              // 9:00, 14:30
-    '\\b(noon|midnight)\\b',
-    '\\b(mon|tues?|wed(nes)?|thurs?|fri|sat(ur)?|sun)(day)?\\b',
-    '\\b(jan(uary)?|feb(ruary)?|mar(ch)?|apr(il)?|may|jun(e)?|jul(y)?|aug(ust)?|sept?(ember)?|oct(ober)?|nov(ember)?|dec(ember)?)\\b',
-    '\\b\\d{1,2}/\\d{1,2}\\b',                            // 9/5, 10/12
-    '\\b\\d{4}-\\d{2}-\\d{2}\\b',                         // 2026-09-05
-    '\\b\\d{1,2}(st|nd|rd|th)\\b',                        // 5th, 21st
-    '\\b(today|tomorrow|tonight|this week|next week|upcoming)\\b',
-    '\\b(deadline|due|rsvp|register|registration|event|meeting|session|workshop|seminar|webinar|fair|exam|midterm|finals?|quiz|schedule|appointment|calendar|save the date|join us)\\b'
-  ],
-
-  // Events starting further out than this are skipped as likely
-  // mis-extractions (wrong-year dates and similar).
+  // Brightspace and Gradescope items further out than this are skipped as
+  // likely stale or wrong-year entries.
   MAX_EVENT_HORIZON_DAYS: 370,
 
   // Your waking window. When a reply command gives no clock time ("get
@@ -92,11 +66,11 @@ var CONFIG = {
 
   // An undecided item is dropped after this long in the queue (and always
   // once its event has passed) — keeps the card and emails concise. If a
-  // fresh email about the same event arrives later, it gets asked anew.
+  // later sync finds the same item again, it gets asked anew.
   PENDING_MAX_AGE_HOURS: 48,
 
   // Trigger frequency in minutes (used by setup()). Valid: 1, 5, 10, 15, 30.
-  // 5 is the sweet spot: near-realtime replies/emails at ~20% of the free
+  // 5 is the sweet spot: near-realtime replies/receipts at ~20% of the free
   // tier's 90-min/day trigger-runtime quota. Every-1-minute would spend most
   // of that quota on idle runs and risk dead runs late in the day.
   TRIGGER_EVERY_MINUTES: 5,
@@ -123,21 +97,30 @@ var CONFIG = {
   BRIGHTSPACE_ICS_URL: '',
   BS_SCAN_EVERY_HOURS: 1,
 
-  // Free-form guidance injected into the LLM prompt. Edit to taste — this is
-  // where "intelligently" gets personalized.
-  USER_PREFERENCES: [
-    'I am a USC student.',
-    'AUTO-ADD (decision "auto_add"): things I am personally committed to —',
-    'my registered classes and schedule changes, advising or medical',
-    'appointments, events I already RSVP\'d to, exams, and hard academic',
-    'deadlines (add deadlines as events at the due time).',
-    'ASK ME (decision "ask_user"): optional-but-plausibly-interesting things —',
-    'career fairs, info sessions, club meetings, guest speakers, workshops,',
-    'social events, free food events.',
-    'IGNORE (decision "ignore"): pure marketing, fundraising asks, surveys,',
-    'newsletters with no single concrete event, and events that already',
-    'happened.'
-  ].join(' ')
+  // Heads-up bars. Calendar's week view only shows the current week, so a
+  // midterm or project two weeks out stays invisible until the week it's
+  // due. Exams and big assignments therefore also get a multi-day all-day
+  // bar (purple, no notifications) that starts LEADUP_DAYS early and ends on
+  // the due/exam day. Homework and quizzes stay single-day tasks.
+  // A bar follows its item: a new due date moves it; ticking off or deleting
+  // the item removes it. Delete a bar by hand and it stays gone.
+  // Looks at your Google Tasks and at events on CALENDAR_ID (including ones
+  // you added yourself), but not at recurring events.
+  LEADUP_ENABLED: true,
+  LEADUP_DAYS: 14,
+  // A title matching any of these (case-insensitive regex) gets a bar…
+  LEADUP_PATTERNS: [
+    '\\b(midterm|exam|final|test)s?\\b',
+    '\\b(project|paper|essay|portfolio|presentation|proposal|report|thesis|capstone)s?\\b',
+    '\\bWP ?\\d'                                       // writing projects: WP1, WP2…
+  ],
+  // …unless it also matches one of these.
+  LEADUP_SKIP_PATTERNS: [
+    '\\breview session\\b', '\\boffice hours?\\b', '\\bstudy (group|session)\\b',
+    '\\bmeeting\\b', '\\binfo session\\b'
+  ],
+  // true = a bar for EVERY task/deadline, homework included.
+  LEADUP_ALL_DEADLINES: false
 };
 
 /**
@@ -147,14 +130,14 @@ var CONFIG = {
  */
 var PROPS = {
   API_KEY: 'GEMINI_API_KEY',
-  SEEN_MESSAGES: 'MB_SEEN_MSGS',   // JSON array of processed Gmail message IDs
-  FAILS: 'MB_FAILS',               // JSON map messageId -> consecutive failure count
+  SEEN_MESSAGES: 'MB_SEEN_MSGS',   // JSON array of handled Gmail message IDs (replies, receipts)
   LAST_RUN: 'MB_LAST_RUN',         // epoch ms of last successful scan
-  ABORT: 'MB_ABORT',               // set by a new run to ask an in-flight run to stop
   GS_EMAIL: 'GS_EMAIL',            // Gradescope login (set via setGradescopeCredentials)
   GS_PASSWORD: 'GS_PASSWORD',
   GS_COOKIES: 'MB_GS_COOKIES',     // cached Gradescope session cookies
   GS_LAST: 'MB_GS_LAST',           // epoch ms of last Gradescope scan
   BS_LAST: 'MB_BS_LAST',           // epoch ms of last Brightspace feed scan
-  PRUNE_LAST: 'MB_PRUNE_LAST'      // epoch ms of last decided-store pruning
+  PRUNE_LAST: 'MB_PRUNE_LAST',     // epoch ms of last decided-store pruning
+  LEADUP_LAST: 'MB_LEADUP_LAST',   // epoch ms of last heads-up bar sync
+  LEADUP_MADE: 'MB_LEADUP_MADE'    // JSON map of bars MailBrah made (a hand-deleted one stays gone)
 };

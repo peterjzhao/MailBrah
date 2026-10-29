@@ -81,6 +81,9 @@ function isDuplicate_(title, start, end) {
   );
   for (var i = 0; i < existing.length; i++) {
     var ev = existing[i];
+    // Heads-up bars (LeadUp.js) span weeks and share course words with
+    // everything else in that course — they're never duplicates of anything.
+    if (leadUpSourceOf_(ev)) continue;
     var overlaps = ev.getStartTime() < end && ev.getEndTime() > start;
     if (overlaps && titleSimilarity_(title, ev.getTitle()) >= 0.6) return true;
   }
@@ -164,7 +167,7 @@ function findConflicts_(start, end) {
 function createCalendarEvent_(evt) {
   var cal = getCalendar_();
   var description = (evt.description ? evt.description + '\n\n' : '') +
-    'From email: "' + (evt.sourceSubject || '') + '"\n' +
+    (evt.sourceSubject ? 'From: "' + evt.sourceSubject + '"\n' : '') +
     (evt.sourceMsgId ? 'https://mail.google.com/mail/u/0/#all/' + evt.sourceMsgId + '\n' : '') +
     'Added by MailBrah';
   var options = { description: description };

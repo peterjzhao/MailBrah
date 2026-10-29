@@ -5,10 +5,8 @@
  * first, older ones only when it is overloaded or rate-limited. The key
  * lives in Script Properties as GEMINI_API_KEY.
  *
- * Two jobs:
- *  - extractEventsWithGemini(email): pull events/deadlines out of one email.
- *  - interpretReplyWithGemini_(replyText, pending): turn a plain-words reply
- *    to a notification email into decisions on pending items + new events.
+ * One job: interpretReplyWithGemini_(replyText, pending) turns a plain-words
+ * reply to a notification email into decisions on pending items + new events.
  */
 
 var GEMINI_EVENT_ITEM_SCHEMA = {
@@ -21,20 +19,9 @@ var GEMINI_EVENT_ITEM_SCHEMA = {
     allDay: { type: 'boolean' },
     timeGiven: { type: 'boolean', description: 'true if the source stated an explicit clock time; false if only a day was given' },
     location: { type: 'string', description: 'Venue/room/address, or empty string' },
-    description: { type: 'string', description: '1-3 sentence summary of what this event is' },
-    decision: { type: 'string', enum: ['auto_add', 'ask_user', 'ignore'] },
-    reasoning: { type: 'string', description: 'One short sentence: why this decision' },
-    confidence: { type: 'number', description: '0-1 confidence that the extracted date/time is correct' }
+    description: { type: 'string', description: '1-3 sentence summary of what this event is' }
   },
-  required: ['title', 'kind', 'startLocal', 'endLocal', 'allDay', 'timeGiven', 'decision', 'reasoning', 'confidence']
-};
-
-var GEMINI_EVENTS_SCHEMA = {
-  type: 'object',
-  properties: {
-    events: { type: 'array', items: GEMINI_EVENT_ITEM_SCHEMA }
-  },
-  required: ['events']
+  required: ['title', 'kind', 'startLocal', 'endLocal', 'allDay', 'timeGiven']
 };
 
 var GEMINI_REPLY_SCHEMA = {
@@ -62,54 +49,6 @@ var GEMINI_REPLY_SCHEMA = {
   },
   required: ['decisions', 'newEvents', 'wantsPendingList', 'note']
 };
-
-/**
- * @param {Object} email {subject, from, receivedIso, body}
- * @return {Array<Object>} extracted events (possibly empty)
- */
-function extractEventsWithGemini(email) {
-  var todayLocal = Utilities.formatDate(new Date(), CONFIG.TIMEZONE, "yyyy-MM-dd'T'HH:mm:ss");
-  var prompt = [
-    'You extract calendar events from a university email for one specific student.',
-    'Current local date/time (' + CONFIG.TIMEZONE + '): ' + todayLocal,
-    '',
-    'STUDENT PREFERENCES: ' + CONFIG.USER_PREFERENCES,
-    '',
-    'Rules:',
-    '- Extract only concrete events/deadlines with a resolvable date. If the email',
-    '  has none, return an empty events array.',
-    '- All times are local to ' + CONFIG.TIMEZONE + ' unless the email says otherwise;',
-    '  convert relative dates ("this Friday", "tomorrow") using the current date above.',
-    '- An email listing several distinct events yields several entries.',
-    '- kind "deadline" = something the student submits/completes by a cutoff',
-    '  (homework, problem sets, applications, registration closes) with startLocal',
-    '  as the due time; kind "event" = something attended at a place/time.',
-    '- Events that already ended: decision "ignore".',
-    '- decision "auto_add" ONLY for things the student is personally committed to',
-    '  per the preferences. When in doubt between auto_add and ask_user, choose ask_user.',
-    '- TITLE CONVENTION (strict): deadlines are "COURSE — Task" (e.g.',
-    '  "PHYS 152 — HW 4", "WRIT 150 — AA1 Draft"); events are',
-    '  "Organization — Event name" (e.g. "Viterbi — Career Fair",',
-    '  "USC Libraries — Study Night"). Infer the course/organization from the',
-    '  sender and body; if none is identifiable, use the event name alone.',
-    '  NEVER put the location, date, or time in the title — location goes in',
-    '  the location field, everything else in description.',
-    '- timeGiven: true when the email states a clock time; false when only a date.',
-    '',
-    'EMAIL',
-    'From: ' + email.from,
-    'Subject: ' + email.subject,
-    'Received: ' + email.receivedIso,
-    'Body:',
-    truncateForPrompt_(email.body, 9000)
-  ].join('\n');
-
-  var parsed = callLLM_(prompt, GEMINI_EVENTS_SCHEMA);
-  if (!parsed) return [];
-  return (parsed.events || []).filter(function (evt) {
-    return evt && evt.title && evt.startLocal;
-  });
-}
 
 /**
  * Interpret a plain-words reply to a notification email.
